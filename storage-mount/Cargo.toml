@@ -1,0 +1,23 @@
+[package]
+name = "storage-mount"
+version = "0.1.0"
+edition = "2021"
+description = "Mount and manage storage devices for rtsp-server-remote"
+
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "storage-mount"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+thiserror = "1"
+chrono = "0.4"
+dialoguer = "0.11"
+notify = "6"
+uuid = { version = "1", features = ["v4"] }

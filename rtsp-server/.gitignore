@@ -1,0 +1,3 @@
+/target/
+*.mp4
+Cargo.lock

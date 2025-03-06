@@ -1,0 +1,37 @@
+[package]
+name = "rtsp-server-remote"
+version = "0.1.0"
+edition = "2021"
+
+
+[dependencies]
+# GStreamer for RTSP server
+gstreamer = "0.23"
+gstreamer-rtsp-server = "0.23"
+glib = "0.20"
+
+# QUIC transport
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+rcgen = "0.13"
+
+# Ed25519 for fingerprinting
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+hex = "0.4"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Error handling
+anyhow = "1"
+
+# ONVIF client
+onvif-client = { path = "../onvif-client" }
+
+# FFmpeg recording
+ffmpeg-recorder = { path = "../ffmpeg-recorder" }
+
+# QUIC common utilities
+quic-common = { path = "../quic-common" }

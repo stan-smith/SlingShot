@@ -1,0 +1,10 @@
+[package]
+name = "quic-auth"
+version = "0.1.0"
+edition = "2021"
+
+
+[dependencies]
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+hex = "0.4"

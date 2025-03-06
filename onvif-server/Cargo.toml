@@ -1,0 +1,18 @@
+[package]
+name = "onvif-server"
+version = "0.1.0"
+edition = "2021"
+
+
+[dependencies]
+# HTTP server
+axum = "0.8"
+
+# XML parsing for SOAP
+quick-xml = "0.37"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Error handling
+anyhow = "1"

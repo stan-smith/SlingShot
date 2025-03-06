@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "rtsp-server",
+    "rtsp-server-remote",
+    "quic-common",
+    "quic-auth",
+    "onvif-server",
+    "onvif-client",
+    "admin-web",
+    "storage-mount",
+    "storage-selector",
+    "ffmpeg-recorder",
+]
