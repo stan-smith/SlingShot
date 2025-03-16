@@ -70,11 +70,13 @@ async fn async_main() -> Result<()> {
 
     println!("RTSP relay server listening on port 8554");
 
-    // Generate self-signed certificate for QUIC
-    let rcgen::CertifiedKey { cert, key_pair } = rcgen::generate_simple_self_signed(vec![
+    // Generate self-signed Ed25519 certificate for QUIC
+    let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
+    let cert_params = rcgen::CertificateParams::new(vec![
         "localhost".to_string(),
         "0.0.0.0".to_string(),
     ])?;
+    let cert = cert_params.self_signed(&key_pair)?;
 
     let cert_pem = cert.pem();
     let key_pem = key_pair.serialize_pem();
