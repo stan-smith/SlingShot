@@ -4,18 +4,20 @@ use anyhow::Result;
 use ffmpeg_recorder::{has_disk_space, Recorder, RecorderConfig};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use gstreamer::prelude::*;
-use gstreamer_rtsp_server::prelude::*;
+use gstreamer_app::AppSink;
 use onvif_client::OnvifClient;
 use quinn::{ClientConfig, Endpoint};
 use std::env;
 use std::io::{self, BufRead, Write};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
-/// Remote Node - RTSP Relay with ONVIF Camera Control
+/// Remote Node - Video Streamer with ONVIF Camera Control
 ///
-/// - Connects to an ONVIF camera and relays its stream
-/// - Connects to central node via QUIC for authentication and commands
+/// - Connects to an ONVIF camera and captures its stream
+/// - Connects to central node via QUIC for authentication, commands, and video
+/// - Sends video frames over QUIC (no local RTSP server needed)
 /// - Accepts PTZ commands to control the camera
 struct CameraConfig {
     host: String,
@@ -35,10 +37,10 @@ struct StreamParams {
 impl Default for StreamParams {
     fn default() -> Self {
         Self {
-            width: 1920,
-            height: 1080,
+            width: 1024,
+            height: 576,
             framerate: 30,
-            bitrate: 4000,
+            bitrate: 400,  // Start low, can increase via command
         }
     }
 }
@@ -196,65 +198,144 @@ async fn async_main(node_name: String, central_addr: String, camera: CameraConfi
         params: StreamParams::default(),
     }));
 
-    // Create RTSP server to relay the camera stream
-    let rtsp_server = gstreamer_rtsp_server::RTSPServer::new();
-    rtsp_server.set_service("8554");
-    let mounts = rtsp_server.mount_points().expect("Failed to get mount points");
+    // Create channel for video frames (will be sent over QUIC)
+    let (frame_tx, frame_rx) = mpsc::channel::<quic_video::VideoFrame>(30);
 
-    // Create factory that pulls from the ONVIF camera with dynamic pipeline
-    let factory = gstreamer_rtsp_server::RTSPMediaFactory::new();
+    // Create GStreamer pipeline with appsink (video goes over QUIC, not local RTSP)
+    let gst_pipeline = gstreamer::Pipeline::new();
     let params = pipeline_state.lock().unwrap().params.clone();
-    let pipeline = format!(
-        "( rtspsrc location=\"{}\" latency=100 \
-           ! rtph264depay \
-           ! avdec_h264 \
-           ! videoconvert \
-           ! videoscale \
-           ! videorate \
-           ! capsfilter name=caps caps=video/x-raw,width={},height={},framerate={}/1 \
-           ! x264enc name=encoder bitrate={} tune=zerolatency speed-preset=ultrafast \
-           ! rtph264pay name=pay0 pt=96 )",
-        camera_rtsp_url, params.width, params.height, params.framerate, params.bitrate
-    );
-    factory.set_launch(&pipeline);
-    factory.set_shared(true);
 
-    // Capture element references when media is configured
-    let state_clone = Arc::clone(&pipeline_state);
-    factory.connect_media_configure(move |_factory, media| {
-        let element = media.element();
-        if let Some(bin) = element.downcast_ref::<gstreamer::Bin>() {
-            let mut state = state_clone.lock().unwrap();
-            state.capsfilter = bin.by_name("caps");
-            state.encoder = bin.by_name("encoder");
-            if state.capsfilter.is_some() && state.encoder.is_some() {
-                println!("Pipeline elements captured for dynamic control");
-            }
+    let src = gstreamer::ElementFactory::make("rtspsrc")
+        .property("location", &camera_rtsp_url)
+        .property("latency", 100u32)
+        .build()?;
+
+    let depay = gstreamer::ElementFactory::make("rtph264depay").build()?;
+    let decode = gstreamer::ElementFactory::make("avdec_h264").build()?;
+    let convert = gstreamer::ElementFactory::make("videoconvert").build()?;
+    let scale = gstreamer::ElementFactory::make("videoscale").build()?;
+    let rate = gstreamer::ElementFactory::make("videorate").build()?;
+
+    let capsfilter = gstreamer::ElementFactory::make("capsfilter")
+        .name("caps")
+        .property(
+            "caps",
+            gstreamer::Caps::builder("video/x-raw")
+                .field("width", params.width)
+                .field("height", params.height)
+                .field("framerate", gstreamer::Fraction::new(params.framerate, 1))
+                .build(),
+        )
+        .build()?;
+
+    let encoder = gstreamer::ElementFactory::make("x264enc")
+        .name("encoder")
+        .property("bitrate", params.bitrate)
+        .property_from_str("tune", "zerolatency")
+        .property_from_str("speed-preset", "ultrafast")
+        .property("key-int-max", 30u32)
+        .build()?;
+
+    let parser = gstreamer::ElementFactory::make("h264parse").build()?;
+
+    let appsink = gstreamer::ElementFactory::make("appsink")
+        .name("videosink")
+        .build()?
+        .dynamic_cast::<AppSink>()
+        .unwrap();
+
+    // Configure appsink - never drop frames, let backpressure flow
+    // H.264 decoder can't handle gaps, so dropping frames causes decode errors
+    appsink.set_sync(false);
+    appsink.set_max_buffers(30);  // ~1 second buffer at 30fps
+    appsink.set_drop(false);      // NEVER drop - backpressure will naturally slow encoder
+    appsink.set_caps(Some(
+        &gstreamer::Caps::builder("video/x-h264")
+            .field("stream-format", "byte-stream")
+            .field("alignment", "au")
+            .build(),
+    ));
+
+    // Add elements to pipeline
+    gst_pipeline.add_many([
+        &src,
+        &depay,
+        &decode,
+        &convert,
+        &scale,
+        &rate,
+        &capsfilter,
+        &encoder,
+        &parser,
+        appsink.upcast_ref(),
+    ])?;
+
+    // Link static elements (depay onwards)
+    gstreamer::Element::link_many([
+        &depay,
+        &decode,
+        &convert,
+        &scale,
+        &rate,
+        &capsfilter,
+        &encoder,
+        &parser,
+        appsink.upcast_ref(),
+    ])?;
+
+    // Handle dynamic pad from rtspsrc
+    let depay_weak = depay.downgrade();
+    src.connect_pad_added(move |_src, src_pad| {
+        let Some(depay) = depay_weak.upgrade() else {
+            return;
+        };
+        let sink_pad = depay.static_pad("sink").unwrap();
+        if sink_pad.is_linked() {
+            return;
+        }
+        if let Err(e) = src_pad.link(&sink_pad) {
+            eprintln!("Failed to link rtspsrc pad: {:?}", e);
         }
     });
 
-    mounts.add_factory("/stream", factory);
+    // Store element references for dynamic control
+    {
+        let mut state = pipeline_state.lock().unwrap();
+        state.capsfilter = Some(capsfilter.clone());
+        state.encoder = Some(encoder.clone());
+    }
 
-    // Create GLib main context and attach RTSP server BEFORE running main loop
-    // The main loop will run in a separate thread, but we attach first
-    let main_ctx = glib::MainContext::default();
+    // Set up appsink callback to send frames to channel
+    let frame_tx_clone = frame_tx.clone();
+    let frame_sequence = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let frame_sequence_clone = frame_sequence.clone();
+    appsink.set_callbacks(
+        gstreamer_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let sample = sink.pull_sample().map_err(|_| gstreamer::FlowError::Error)?;
+                let buffer = sample.buffer().ok_or(gstreamer::FlowError::Error)?;
+                let map = buffer.map_readable().map_err(|_| gstreamer::FlowError::Error)?;
 
-    // Attach RTSP server to the context (this adds sources, doesn't need loop running)
-    let _rtsp_id = rtsp_server.attach(Some(&main_ctx)).expect("Failed to attach RTSP server");
+                // Convert nanoseconds to 90kHz RTP clock
+                let pts = buffer.pts().map(|t| t.nseconds() / 11111).unwrap_or(0);
+                let is_keyframe = !buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT);
 
-    // Now start the main loop in a background thread
-    let main_loop = glib::MainLoop::new(Some(&main_ctx), false);
-    let main_loop_clone = main_loop.clone();
-    std::thread::spawn(move || {
-        main_loop_clone.run();
-    });
+                // Get next sequence number
+                let seq = frame_sequence_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let frame = quic_video::VideoFrame::new(seq, pts, is_keyframe, map.as_slice().to_vec());
 
-    // Get local IP for RTSP URL
-    let local_ip = get_local_ip().unwrap_or_else(|| "127.0.0.1".to_string());
-    let relay_rtsp_url = format!("rtsp://{}:8554/stream", local_ip);
+                // IMPORTANT: Never drop frames - decoder can't handle gaps in frame sequence
+                // If QUIC can't keep up, backpressure will naturally slow down the pipeline
+                let _ = frame_tx_clone.blocking_send(frame);
 
-    println!("RTSP relay started");
-    println!("Relay URL: {}", relay_rtsp_url);
+                Ok(gstreamer::FlowSuccess::Ok)
+            })
+            .build(),
+    );
+
+    // Start the pipeline
+    gst_pipeline.set_state(gstreamer::State::Playing)?;
+    println!("Video pipeline started (camera → QUIC)");
     println!();
 
     // Start recorder now (after GLib is set up, before central connection)
@@ -301,18 +382,12 @@ async fn async_main(node_name: String, central_addr: String, camera: CameraConfi
         .connect_with(client_config, remote_addr, "localhost")?
         .await?;
 
-    // Determine which local IP is used to reach central
-    // This ensures we advertise the correct IP (e.g., Tailscale IP when connecting over Tailscale)
-    let connection_local_ip = get_local_ip_for_dest(&remote_addr.ip())
-        .unwrap_or_else(|| local_ip.clone());
-    let advertised_rtsp_url = format!("rtsp://{}:8554/stream", connection_local_ip);
-
     println!("Connected to central node");
-    println!("Advertising RTSP URL: {}", advertised_rtsp_url);
 
-    // Send authentication request: AUTH|name|fingerprint|rtsp_url
+    // Send authentication request: AUTH|name|fingerprint|VIDEO
+    // The "VIDEO" marker indicates this node will stream video over QUIC (not RTSP)
     let mut send_stream = connection.open_uni().await?;
-    let auth_request = format!("AUTH|{}|{}|{}", node_name, fingerprint, advertised_rtsp_url);
+    let auth_request = format!("AUTH|{}|{}|VIDEO", node_name, fingerprint);
     send_stream.write_all(auth_request.as_bytes()).await?;
     send_stream.finish()?;
 
@@ -332,11 +407,76 @@ async fn async_main(node_name: String, central_addr: String, camera: CameraConfi
         confirm_stream.write_all(confirmation.as_bytes()).await?;
         confirm_stream.finish()?;
 
+        // Open dedicated QUIC stream for video
+        let mut video_stream = connection.open_uni().await?;
+
+        // Send VIDEO_START marker so central knows this is a video stream
+        video_stream.write_all(b"VIDEO_START").await?;
+
         println!();
         println!("==========================================");
-        println!("READY - Listening for commands");
+        println!("READY - Streaming video over QUIC");
         println!("==========================================");
         println!();
+
+        // Spawn video sender task
+        let node_name_clone = node_name.clone();
+        let video_handle = tokio::spawn(async move {
+            let mut frame_rx = frame_rx;
+            let mut frame_count = 0u64;
+            let mut bytes_sent = 0u64;
+            let mut last_report_time = std::time::Instant::now();
+            let mut last_report_bytes = 0u64;
+
+            while let Some(frame) = frame_rx.recv().await {
+                let encoded = frame.encode();
+                let frame_size = encoded.len();
+
+                // Log every frame for debugging desync
+                if frame_count < 5 || frame_count % 500 == 0 || frame.sequence > 2630 {
+                    eprintln!("[SEND:{}] seq={} len={} first8={:02X?}",
+                        node_name_clone, frame.sequence, frame_size, &encoded[..8.min(encoded.len())]);
+                }
+
+                // Write length prefix (4 bytes) + frame data
+                let len_bytes = (frame_size as u32).to_be_bytes();
+                if video_stream.write_all(&len_bytes).await.is_err() {
+                    break;
+                }
+                if video_stream.write_all(&encoded).await.is_err() {
+                    break;
+                }
+
+                frame_count += 1;
+                bytes_sent += (4 + frame_size) as u64; // 4 len + data
+
+                // Print stats every 30 frames (about once per second)
+                if frame_count % 30 == 0 {
+                    let now = std::time::Instant::now();
+                    let interval_secs = now.duration_since(last_report_time).as_secs_f64();
+                    let interval_bytes = bytes_sent - last_report_bytes;
+                    let mbps = if interval_secs > 0.0 {
+                        (interval_bytes as f64 * 8.0) / (interval_secs * 1_000_000.0)
+                    } else {
+                        0.0
+                    };
+
+                    println!(
+                        "[{}] {} frames, {:.1} MB total, {:.2} Mbps{}",
+                        node_name_clone,
+                        frame_count,
+                        bytes_sent as f64 / 1_000_000.0,
+                        mbps,
+                        if frame.is_keyframe { " [KEY]" } else { "" }
+                    );
+
+                    last_report_time = now;
+                    last_report_bytes = bytes_sent;
+                }
+            }
+
+            println!("[{}] Video stream ended", node_name_clone);
+        });
 
         // Command loop with periodic recorder health check
         let mut health_check_interval = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -371,6 +511,9 @@ async fn async_main(node_name: String, central_addr: String, camera: CameraConfi
                     }
                 }
                 _ = health_check_interval.tick() => {
+                    // Log QUIC connection stats
+                    quic_metrics::log_stats(&connection, &node_name);
+
                     // Check recorder health
                     if let Some(ref mut rec) = recorder {
                         if let Err(e) = rec.check_and_restart() {
@@ -386,6 +529,9 @@ async fn async_main(node_name: String, central_addr: String, camera: CameraConfi
                 }
             }
         }
+
+        // Cancel video sender when disconnected
+        video_handle.abort();
     } else if response.starts_with("DENIED") {
         println!("Denied by central node: {}", response);
     } else {
@@ -400,7 +546,8 @@ async fn async_main(node_name: String, central_addr: String, camera: CameraConfi
         }
     }
 
-    main_loop.quit();
+    // Stop GStreamer pipeline
+    gst_pipeline.set_state(gstreamer::State::Null)?;
     Ok(())
 }
 
@@ -619,23 +766,6 @@ fn handle_ptz_command(parts: Vec<&str>, onvif: &Arc<Mutex<OnvifClient>>) -> Resu
 
         _ => Err(format!("Unknown command: {}. Try: ptz, stop, goto, status, info, home, left, right, up, down, zoomin, zoomout", parts[0])),
     }
-}
-
-fn get_local_ip() -> Option<String> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("8.8.8.8:80").ok()?;
-    let addr = socket.local_addr().ok()?;
-    Some(addr.ip().to_string())
-}
-
-/// Get local IP used to reach a specific destination
-/// This ensures we advertise the correct interface (e.g., Tailscale IP when connecting over Tailscale)
-fn get_local_ip_for_dest(dest: &std::net::IpAddr) -> Option<String> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    let dest_addr = std::net::SocketAddr::new(*dest, 80);
-    socket.connect(dest_addr).ok()?;
-    let addr = socket.local_addr().ok()?;
-    Some(addr.ip().to_string())
 }
 
 fn prompt_profile_selection(count: usize) -> Result<usize> {

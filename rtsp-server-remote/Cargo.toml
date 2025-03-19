@@ -35,3 +35,15 @@ ffmpeg-recorder = { path = "../ffmpeg-recorder" }
 
 # QUIC common utilities
 quic-common = { path = "../quic-common" }
+
+# QUIC metrics
+quic-metrics = { path = "../quic-metrics" }
+
+# QUIC video transport
+quic-video = { path = "../quic-video" }
+
+# GStreamer bridge
+gst-bridge = { path = "../gst-bridge" }
+
+# GStreamer app elements
+gstreamer-app = "0.23"

@@ -1,5 +1,7 @@
 use admin_web::{broadcast, request_approval, run_admin_server, AdminCommand, AdminState};
 use anyhow::Result;
+use gstreamer::prelude::*;
+use gstreamer_app::AppSrc;
 use gstreamer_rtsp_server::prelude::*;
 use onvif_server::{get_local_ip, run_onvif_server, NodeHandle};
 use quinn::{Endpoint, ServerConfig};
@@ -10,15 +12,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// Central Node - RTSP Stream Controller & Relay
+/// Central Node - RTSP Stream Controller
 ///
-/// - Accepts QUIC connections from remote RTSP server nodes
-/// - Relays their RTSP streams locally on node-specific paths
+/// - Accepts QUIC connections from remote video nodes
+/// - Receives video over QUIC and serves via local RTSP
 /// - Sends commands to control stream parameters (resolution, bitrate, framerate)
 struct RemoteNode {
     address: SocketAddr,
     fingerprint: String,
-    rtsp_url: String,
     cmd_tx: mpsc::Sender<String>,
 }
 
@@ -229,8 +230,8 @@ async fn async_main() -> Result<()> {
                             println!("Connected nodes:");
                             for (name, node) in nodes.iter() {
                                 println!("  {} - {} ({})", name, node.address, &node.fingerprint[..16]);
-                                println!("    Remote RTSP: {}", node.rtsp_url);
-                                println!("    Local relay: rtsp://127.0.0.1:8554/{}/stream", name);
+                                println!("    Video: QUIC stream");
+                                println!("    Local RTSP: rtsp://127.0.0.1:8554/{}/stream", name);
                             }
                         }
                     }
@@ -331,7 +332,7 @@ async fn handle_connection(
 
     println!("\n[New connection from {}]", remote);
 
-    // Receive authentication request: AUTH|name|fingerprint|rtsp_url
+    // Receive authentication request: AUTH|name|fingerprint|VIDEO
     let mut recv_stream = connection.accept_uni().await?;
     let buffer = recv_stream.read_to_end(1024 * 1024).await?;
     let message = String::from_utf8_lossy(&buffer);
@@ -343,20 +344,20 @@ async fn handle_connection(
 
     let parts: Vec<&str> = message.split('|').collect();
     if parts.len() != 4 {
-        println!("Malformed auth from {} (expected AUTH|name|fingerprint|rtsp_url)", remote);
+        println!("Malformed auth from {} (expected AUTH|name|fingerprint|VIDEO)", remote);
         return Ok(());
     }
 
     let node_name = parts[1].to_string();
     let fingerprint = parts[2].to_string();
-    let rtsp_url = parts[3].to_string();
+    let video_mode = parts[3] == "VIDEO";
 
     println!("==========================================");
     println!("AUTHENTICATION REQUEST");
     println!("  Node: {}", node_name);
     println!("  Address: {}", remote);
     println!("  Fingerprint: {}", &fingerprint[..32.min(fingerprint.len())]);
-    println!("  RTSP URL: {}", rtsp_url);
+    println!("  Video Mode: {}", if video_mode { "QUIC" } else { "Legacy RTSP" });
     println!("==========================================");
 
     // Request approval via admin web interface
@@ -364,7 +365,7 @@ async fn handle_connection(
         &admin_state,
         node_name.clone(),
         fingerprint.clone(),
-        rtsp_url.clone(),
+        format!("Video over QUIC from {}", remote),
         remote.to_string(),
     )
     .await;
@@ -387,9 +388,101 @@ async fn handle_connection(
             println!("Node {} confirmed and ready", node_name);
         }
 
-        // Create RTSP relay factory for this node
+        // Wait for VIDEO_START stream
+        let mut video_stream = connection.accept_uni().await?;
+
+        // Read the first bytes to check for VIDEO_START marker
+        let mut marker_buf = [0u8; 11]; // "VIDEO_START".len()
+        video_stream.read_exact(&mut marker_buf).await?;
+        if &marker_buf != b"VIDEO_START" {
+            println!("Expected VIDEO_START marker from {}", node_name);
+            return Ok(());
+        }
+
+        println!("Video stream established from {}", node_name);
+
+        // Create RTSP factory with appsrc for this node
         let mount_path = format!("/{}/stream", node_name);
-        create_relay_factory(&mounts, &mount_path, &rtsp_url)?;
+
+        // Channel for video frames (shared with RTSP factory)
+        let frame_tx: Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<quic_video::VideoFrame>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let frame_tx_clone = Arc::clone(&frame_tx);
+
+        // Create factory with appsrc pipeline
+        // Using do-timestamp=true lets GStreamer handle timestamps based on buffer arrival,
+        // which is more robust for live streaming than manual PTS setting
+        let factory = gstreamer_rtsp_server::RTSPMediaFactory::new();
+        factory.set_launch(
+            "( appsrc name=videosrc is-live=true format=time do-timestamp=true \
+               caps=video/x-h264,stream-format=byte-stream,alignment=au \
+               ! h264parse \
+               ! rtph264pay name=pay0 pt=96 )",
+        );
+        factory.set_shared(true);
+
+        // Get appsrc when media is configured
+        factory.connect_media_configure(move |_factory, media| {
+            let element = media.element();
+            if let Some(bin) = element.downcast_ref::<gstreamer::Bin>() {
+                if let Some(appsrc_elem) = bin.by_name("videosrc") {
+                    let appsrc = appsrc_elem.dynamic_cast::<AppSrc>().unwrap();
+
+                    // Create a sync channel for this media instance
+                    let (tx, rx) = std::sync::mpsc::channel::<quic_video::VideoFrame>();
+
+                    // Store sender so we can forward frames to it
+                    *frame_tx_clone.lock().unwrap() = Some(tx);
+
+                    // Spawn thread to push frames to appsrc
+                    // With do-timestamp=true, GStreamer handles timestamps based on arrival time
+                    std::thread::spawn(move || {
+                        let mut waiting_for_keyframe = true;
+                        let mut pushed = 0u64;
+
+                        println!("  [appsrc] Thread started, waiting for keyframe");
+
+                        while let Ok(frame) = rx.recv() {
+                            // Wait for keyframe before starting playback for smoother start
+                            if waiting_for_keyframe {
+                                if !frame.is_keyframe {
+                                    continue;
+                                }
+                                waiting_for_keyframe = false;
+                                println!("  [appsrc] Got keyframe, starting playback");
+                            }
+
+                            // Create buffer - do_timestamp=true handles PTS
+                            let mut buffer = gstreamer::Buffer::from_slice(frame.data.clone());
+                            {
+                                let buffer_ref = buffer.get_mut().unwrap();
+                                if !frame.is_keyframe {
+                                    buffer_ref.set_flags(gstreamer::BufferFlags::DELTA_UNIT);
+                                }
+                            }
+
+                            match appsrc.push_buffer(buffer) {
+                                Ok(_) => {
+                                    pushed += 1;
+                                    if pushed % 30 == 0 {
+                                        println!("  [appsrc] Pushed {} buffers", pushed);
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("  [appsrc] Push error: {:?}, exiting after {} buffers", e, pushed);
+                                    break;
+                                }
+                            }
+                        }
+                        println!("  [appsrc] Thread exiting after {} buffers", pushed);
+                    });
+
+                    println!("RTSP media configured with appsrc for {}", media.element().name());
+                }
+            }
+        });
+
+        mounts.add_factory(&mount_path, factory);
         println!("RTSP relay created at rtsp://127.0.0.1:8554{}", mount_path);
 
         // Create command channel for this node
@@ -403,7 +496,6 @@ async fn handle_connection(
                 RemoteNode {
                     address: remote,
                     fingerprint: fingerprint.clone(),
-                    rtsp_url: rtsp_url.clone(),
                     cmd_tx: cmd_tx.clone(),
                 },
             );
@@ -428,9 +520,135 @@ async fn handle_connection(
         // Notify admin clients
         broadcast(&admin_state, &format!("CONNECTED|{}", node_name)).await;
 
+        // Spawn video receiver task
+        let node_name_video = node_name.clone();
+        let video_handle = tokio::spawn(async move {
+            let mut buffer = Vec::new();
+            let mut frame_count = 0u64;
+            let mut bytes_received = 0u64;
+            let mut crc_errors = 0u64;
+            let start = std::time::Instant::now();
+            let mut seq_tracker = quic_video::SequenceTracker::new();
+
+            // Helper to read more data into buffer
+            async fn read_more(buffer: &mut Vec<u8>, video_stream: &mut quinn::RecvStream, node_name: &str) -> bool {
+                match video_stream.read_chunk(4096, false).await {
+                    Ok(Some(chunk)) => {
+                        buffer.extend_from_slice(&chunk.bytes);
+                        true
+                    }
+                    Ok(None) => {
+                        println!("[{}] Video stream ended", node_name);
+                        false
+                    }
+                    Err(e) => {
+                        println!("[{}] Video stream error: {}", node_name, e);
+                        false
+                    }
+                }
+            }
+
+            loop {
+                // Read until we have at least 4 bytes (length prefix)
+                while buffer.len() < 4 {
+                    if !read_more(&mut buffer, &mut video_stream, &node_name_video).await {
+                        return;
+                    }
+                }
+
+                let frame_len = u32::from_be_bytes(buffer[..4].try_into().unwrap()) as usize;
+
+                // Sanity check frame length - if impossible, stream is corrupted beyond recovery
+                if frame_len > 10_000_000 || frame_len < 29 {
+                    eprintln!("[{}] FRAME DESYNC at frame {}: frame_len={} invalid (expected 29-10M)",
+                        node_name_video, frame_count, frame_len);
+                    eprintln!("[{}] Length bytes: {:02X?}", node_name_video, &buffer[..4]);
+                    eprintln!("[{}] Buffer[0..32]: {:02X?}", node_name_video, &buffer[..buffer.len().min(32)]);
+                    eprintln!("[{}] Total bytes received so far: {}", node_name_video, bytes_received);
+                    return; // Close stream - remote will reconnect
+                }
+                buffer.drain(..4);
+
+                // Read frame data
+                while buffer.len() < frame_len {
+                    if !read_more(&mut buffer, &mut video_stream, &node_name_video).await {
+                        return;
+                    }
+                }
+                let frame_data: Vec<u8> = buffer.drain(..frame_len).collect();
+
+                // Decode frame (includes CRC32 validation)
+                let frame = match quic_video::VideoFrame::decode(&frame_data) {
+                    Ok(f) => {
+                        // Log for debugging - match sender's logging pattern
+                        if frame_count < 5 || frame_count % 500 == 0 || f.sequence > 2630 {
+                            eprintln!("[RECV:{}] seq={} len={} first8={:02X?}",
+                                node_name_video, f.sequence, frame_len, &frame_data[..8.min(frame_data.len())]);
+                        }
+                        f
+                    }
+                    Err(quic_video::DecodeError::ChecksumMismatch { expected, actual, sequence }) => {
+                        crc_errors += 1;
+                        eprintln!("[{}] CRC MISMATCH at frame {}: seq={}, expected 0x{:08X}, got 0x{:08X}",
+                            node_name_video, frame_count, sequence, expected, actual);
+                        eprintln!("[{}] Frame len was {}, data starts: {:02X?}",
+                            node_name_video, frame_len, &frame_data[..frame_data.len().min(32)]);
+                        continue; // Skip this frame, try next
+                    }
+                    Err(e) => {
+                        eprintln!("[{}] Failed to decode frame: {} (frame_len={})", node_name_video, e, frame_len);
+                        continue;
+                    }
+                };
+
+                // Check sequence for gaps
+                if let Some(gap) = seq_tracker.check(frame.sequence) {
+                    eprintln!("[{}] SEQUENCE GAP: expected seq {}, got {} (gap of {} frames)",
+                        node_name_video,
+                        frame.sequence.wrapping_sub(gap),
+                        frame.sequence,
+                        gap);
+                }
+
+                frame_count += 1;
+                bytes_received += (4 + frame_len) as u64; // 4 len + data
+
+                // Send to RTSP pipeline
+                if let Some(tx) = frame_tx.lock().unwrap().as_ref() {
+                    let _ = tx.send(frame.clone());
+                }
+
+                // Print stats every 30 frames
+                if frame_count % 30 == 0 {
+                    let elapsed = start.elapsed().as_secs_f64();
+                    let mbps = (bytes_received as f64 * 8.0) / (elapsed * 1_000_000.0);
+                    let integrity_status = if crc_errors > 0 || seq_tracker.gaps_detected() > 0 {
+                        format!(" [CRC:{} GAPS:{}]", crc_errors, seq_tracker.gaps_detected())
+                    } else {
+                        String::new()
+                    };
+                    println!(
+                        "[{}] Received {} frames, {:.1} MB, {:.2} Mbps{}{}",
+                        node_name_video,
+                        frame_count,
+                        bytes_received as f64 / 1_000_000.0,
+                        mbps,
+                        if frame.is_keyframe { " [KEY]" } else { "" },
+                        integrity_status
+                    );
+                }
+            }
+        });
+
         // Command/response loop
+        let mut stats_interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             tokio::select! {
+                // Log QUIC connection stats
+                _ = stats_interval.tick() => {
+                    quic_metrics::log_stats(&connection, &node_name);
+                }
+
                 // Send commands to remote
                 Some(cmd) = cmd_rx.recv() => {
                     let mut send_stream = connection.open_uni().await?;
@@ -438,7 +656,7 @@ async fn handle_connection(
                     send_stream.finish()?;
                 }
 
-                // Receive responses from remote
+                // Receive responses from remote (commands only, video is handled separately)
                 result = connection.accept_uni() => {
                     match result {
                         Ok(mut recv_stream) => {
@@ -489,6 +707,9 @@ async fn handle_connection(
             }
         }
 
+        // Cancel video receiver when disconnected
+        video_handle.abort();
+
         // Remove relay and node on disconnect
         mounts.remove_factory(&mount_path);
         {
@@ -509,31 +730,6 @@ async fn handle_connection(
         send_stream.finish()?;
         println!("Denied {}", node_name);
     }
-
-    Ok(())
-}
-
-fn create_relay_factory(
-    mounts: &gstreamer_rtsp_server::RTSPMountPoints,
-    mount_path: &str,
-    source_rtsp_url: &str,
-) -> Result<()> {
-    let factory = gstreamer_rtsp_server::RTSPMediaFactory::new();
-
-    // Pipeline: pull from remote RTSP, re-encode, and serve
-    // Using rtspsrc to pull, then depay/decode, re-encode and pay
-    let pipeline = format!(
-        "( rtspsrc location={} latency=100 \
-           ! rtph264depay \
-           ! h264parse \
-           ! rtph264pay name=pay0 pt=96 )",
-        source_rtsp_url
-    );
-
-    factory.set_launch(&pipeline);
-    factory.set_shared(true);
-
-    mounts.add_factory(mount_path, factory);
 
     Ok(())
 }

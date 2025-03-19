@@ -8,6 +8,7 @@ edition = "2021"
 # GStreamer for RTSP
 gstreamer = "0.23"
 gstreamer-rtsp-server = "0.23"
+gstreamer-app = "0.23"
 glib = "0.20"
 
 # QUIC transport
@@ -38,6 +39,12 @@ axum = "0.8"
 
 # QUIC common utilities
 quic-common = { path = "../quic-common" }
+
+# QUIC metrics
+quic-metrics = { path = "../quic-metrics" }
+
+# QUIC video transport
+quic-video = { path = "../quic-video" }
 
 [[bin]]
 name = "rtsp-server"
