@@ -100,8 +100,9 @@ async fn async_main() -> Result<()> {
     let mut server_config = ServerConfig::with_crypto(Arc::new(quic_server_config));
 
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_concurrent_uni_streams(100_u8.into());
-    transport_config.max_concurrent_bidi_streams(100_u8.into());
+    // High limit for stream-per-frame video (30fps = 30 streams/sec per node)
+    transport_config.max_concurrent_uni_streams(1000u32.into());
+    transport_config.max_concurrent_bidi_streams(100u32.into());
     // Keep connection alive indefinitely
     transport_config.max_idle_timeout(None);
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
@@ -388,18 +389,15 @@ async fn handle_connection(
             println!("Node {} confirmed and ready", node_name);
         }
 
-        // Wait for VIDEO_START stream
-        let mut video_stream = connection.accept_uni().await?;
-
-        // Read the first bytes to check for VIDEO_START marker
-        let mut marker_buf = [0u8; 11]; // "VIDEO_START".len()
-        video_stream.read_exact(&mut marker_buf).await?;
-        if &marker_buf != b"VIDEO_START" {
-            println!("Expected VIDEO_START marker from {}", node_name);
+        // Wait for VIDEO_STREAM marker
+        let mut marker_stream = connection.accept_uni().await?;
+        let marker = marker_stream.read_to_end(64).await?;
+        if marker != b"VIDEO_STREAM" {
+            println!("Expected VIDEO_STREAM marker from {}, got {:?}", node_name, String::from_utf8_lossy(&marker));
             return Ok(());
         }
 
-        println!("Video stream established from {}", node_name);
+        println!("Video stream-per-frame mode established from {}", node_name);
 
         // Create RTSP factory with appsrc for this node
         let mount_path = format!("/{}/stream", node_name);
@@ -520,133 +518,39 @@ async fn handle_connection(
         // Notify admin clients
         broadcast(&admin_state, &format!("CONNECTED|{}", node_name)).await;
 
-        // Spawn video receiver task
-        let node_name_video = node_name.clone();
-        let video_handle = tokio::spawn(async move {
-            let mut buffer = Vec::new();
-            let mut frame_count = 0u64;
-            let mut bytes_received = 0u64;
-            let mut crc_errors = 0u64;
-            let start = std::time::Instant::now();
-            let mut seq_tracker = quic_video::SequenceTracker::new();
+        // QoS metrics for this node
+        let mut qos_frames: u64 = 0;
+        let mut qos_bytes: u64 = 0;
+        let mut qos_gaps: u64 = 0;
+        let mut qos_ooo: u64 = 0;
+        let mut qos_dropped: u64 = 0;
+        let mut qos_last_seq: Option<u32> = None;
+        let qos_start = std::time::Instant::now();
+        let mut qos_last_report = std::time::Instant::now();
 
-            // Helper to read more data into buffer
-            async fn read_more(buffer: &mut Vec<u8>, video_stream: &mut quinn::RecvStream, node_name: &str) -> bool {
-                match video_stream.read_chunk(4096, false).await {
-                    Ok(Some(chunk)) => {
-                        buffer.extend_from_slice(&chunk.bytes);
-                        true
-                    }
-                    Ok(None) => {
-                        println!("[{}] Video stream ended", node_name);
-                        false
-                    }
-                    Err(e) => {
-                        println!("[{}] Video stream error: {}", node_name, e);
-                        false
-                    }
-                }
-            }
+        // Cache keyframe for late RTSP clients
+        let cached_keyframe: Arc<std::sync::Mutex<Option<quic_video::VideoFrame>>> =
+            Arc::new(std::sync::Mutex::new(None));
 
-            loop {
-                // Read until we have at least 4 bytes (length prefix)
-                while buffer.len() < 4 {
-                    if !read_more(&mut buffer, &mut video_stream, &node_name_video).await {
-                        return;
-                    }
-                }
-
-                let frame_len = u32::from_be_bytes(buffer[..4].try_into().unwrap()) as usize;
-
-                // Sanity check frame length - if impossible, stream is corrupted beyond recovery
-                if frame_len > 10_000_000 || frame_len < 29 {
-                    eprintln!("[{}] FRAME DESYNC at frame {}: frame_len={} invalid (expected 29-10M)",
-                        node_name_video, frame_count, frame_len);
-                    eprintln!("[{}] Length bytes: {:02X?}", node_name_video, &buffer[..4]);
-                    eprintln!("[{}] Buffer[0..32]: {:02X?}", node_name_video, &buffer[..buffer.len().min(32)]);
-                    eprintln!("[{}] Total bytes received so far: {}", node_name_video, bytes_received);
-                    return; // Close stream - remote will reconnect
-                }
-                buffer.drain(..4);
-
-                // Read frame data
-                while buffer.len() < frame_len {
-                    if !read_more(&mut buffer, &mut video_stream, &node_name_video).await {
-                        return;
-                    }
-                }
-                let frame_data: Vec<u8> = buffer.drain(..frame_len).collect();
-
-                // Decode frame (includes CRC32 validation)
-                let frame = match quic_video::VideoFrame::decode(&frame_data) {
-                    Ok(f) => {
-                        // Log for debugging - match sender's logging pattern
-                        if frame_count < 5 || frame_count % 500 == 0 || f.sequence > 2630 {
-                            eprintln!("[RECV:{}] seq={} len={} first8={:02X?}",
-                                node_name_video, f.sequence, frame_len, &frame_data[..8.min(frame_data.len())]);
-                        }
-                        f
-                    }
-                    Err(quic_video::DecodeError::ChecksumMismatch { expected, actual, sequence }) => {
-                        crc_errors += 1;
-                        eprintln!("[{}] CRC MISMATCH at frame {}: seq={}, expected 0x{:08X}, got 0x{:08X}",
-                            node_name_video, frame_count, sequence, expected, actual);
-                        eprintln!("[{}] Frame len was {}, data starts: {:02X?}",
-                            node_name_video, frame_len, &frame_data[..frame_data.len().min(32)]);
-                        continue; // Skip this frame, try next
-                    }
-                    Err(e) => {
-                        eprintln!("[{}] Failed to decode frame: {} (frame_len={})", node_name_video, e, frame_len);
-                        continue;
-                    }
-                };
-
-                // Check sequence for gaps
-                if let Some(gap) = seq_tracker.check(frame.sequence) {
-                    eprintln!("[{}] SEQUENCE GAP: expected seq {}, got {} (gap of {} frames)",
-                        node_name_video,
-                        frame.sequence.wrapping_sub(gap),
-                        frame.sequence,
-                        gap);
-                }
-
-                frame_count += 1;
-                bytes_received += (4 + frame_len) as u64; // 4 len + data
-
-                // Send to RTSP pipeline
-                if let Some(tx) = frame_tx.lock().unwrap().as_ref() {
-                    let _ = tx.send(frame.clone());
-                }
-
-                // Print stats every 30 frames
-                if frame_count % 30 == 0 {
-                    let elapsed = start.elapsed().as_secs_f64();
-                    let mbps = (bytes_received as f64 * 8.0) / (elapsed * 1_000_000.0);
-                    let integrity_status = if crc_errors > 0 || seq_tracker.gaps_detected() > 0 {
-                        format!(" [CRC:{} GAPS:{}]", crc_errors, seq_tracker.gaps_detected())
-                    } else {
-                        String::new()
-                    };
-                    println!(
-                        "[{}] Received {} frames, {:.1} MB, {:.2} Mbps{}{}",
-                        node_name_video,
-                        frame_count,
-                        bytes_received as f64 / 1_000_000.0,
-                        mbps,
-                        if frame.is_keyframe { " [KEY]" } else { "" },
-                        integrity_status
-                    );
-                }
-            }
-        });
-
-        // Command/response loop
+        // Main loop: handle video frames, commands, and stats
         let mut stats_interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             tokio::select! {
-                // Log QUIC connection stats
+                // Log QUIC connection stats and QoS metrics
                 _ = stats_interval.tick() => {
                     quic_metrics::log_stats(&connection, &node_name);
+
+                    // Print QoS metrics every 5 seconds
+                    if qos_last_report.elapsed().as_secs() >= 5 {
+                        let elapsed = qos_start.elapsed().as_secs_f64();
+                        let fps = qos_frames as f64 / elapsed;
+                        let total = qos_frames + qos_gaps;
+                        let loss = if total > 0 { (qos_gaps as f64 / total as f64) * 100.0 } else { 0.0 };
+                        let mbps = (qos_bytes as f64 * 8.0) / (elapsed * 1_000_000.0);
+                        println!("[{}:QoS] fps={:.1} loss={:.1}% gaps={} ooo={} dropped={} bitrate={:.2}mbps",
+                            node_name, fps, loss, qos_gaps, qos_ooo, qos_dropped, mbps);
+                        qos_last_report = std::time::Instant::now();
+                    }
                 }
 
                 // Send commands to remote
@@ -656,47 +560,96 @@ async fn handle_connection(
                     send_stream.finish()?;
                 }
 
-                // Receive responses from remote (commands only, video is handled separately)
+                // Receive streams (video frames or command responses)
                 result = connection.accept_uni() => {
                     match result {
                         Ok(mut recv_stream) => {
-                            let buffer = recv_stream.read_to_end(1024 * 1024).await?;
-                            let msg = String::from_utf8_lossy(&buffer);
+                            let data = match recv_stream.read_to_end(10_000_000).await {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    eprintln!("[{}] Stream read error: {}", node_name, e);
+                                    qos_dropped += 1;
+                                    continue;
+                                }
+                            };
 
-                            let broadcast_msg = if msg.starts_with("RESULT|") {
-                                let parts: Vec<&str> = msg.splitn(3, '|').collect();
-                                if parts.len() >= 3 {
-                                    let status = parts[1];
-                                    let data = parts[2];
-                                    if status == "ok" {
-                                        println!("[{}] {}", node_name, data);
-                                        Some(format!("[{}] {}", node_name, data))
+                            if data.is_empty() {
+                                continue;
+                            }
+
+                            // Peek first byte to determine stream type
+                            // ASCII printable (32-126) = command response, otherwise = video frame
+                            let first_byte = data[0];
+                            if first_byte >= 32 && first_byte <= 126 {
+                                // Command response (text)
+                                let msg = String::from_utf8_lossy(&data);
+
+                                let broadcast_msg = if msg.starts_with("RESULT|") {
+                                    let parts: Vec<&str> = msg.splitn(3, '|').collect();
+                                    if parts.len() >= 3 {
+                                        let status = parts[1];
+                                        let data = parts[2];
+                                        if status == "ok" {
+                                            println!("[{}] {}", node_name, data);
+                                            Some(format!("[{}] {}", node_name, data))
+                                        } else {
+                                            println!("[{}] Error: {}", node_name, data);
+                                            Some(format!("[{}] Error: {}", node_name, data))
+                                        }
                                     } else {
-                                        println!("[{}] Error: {}", node_name, data);
-                                        Some(format!("[{}] Error: {}", node_name, data))
+                                        None
+                                    }
+                                } else if msg.starts_with("STATUS|") {
+                                    let parts: Vec<&str> = msg.splitn(2, '|').collect();
+                                    if parts.len() >= 2 {
+                                        println!("[{}] Status: {}", node_name, parts[1]);
+                                        Some(format!("[{}] Status: {}", node_name, parts[1]))
+                                    } else {
+                                        None
                                     }
                                 } else {
                                     None
+                                };
+
+                                if let Some(msg) = broadcast_msg {
+                                    broadcast(&admin_state, &msg).await;
                                 }
-                            } else if msg.starts_with("STATUS|") {
-                                let parts: Vec<&str> = msg.splitn(2, '|').collect();
-                                if parts.len() >= 2 {
-                                    println!("[{}] Status: {}", node_name, parts[1]);
-                                    Some(format!("[{}] Status: {}", node_name, parts[1]))
-                                } else {
-                                    None
-                                }
+
+                                print!("> ");
+                                io::stdout().flush().unwrap();
                             } else {
-                                None
-                            };
+                                // Video frame (binary)
+                                let frame = match quic_video::VideoFrame::decode(&data) {
+                                    Ok(f) => f,
+                                    Err(e) => {
+                                        eprintln!("[{}] Frame decode error: {}", node_name, e);
+                                        qos_dropped += 1;
+                                        continue;
+                                    }
+                                };
 
-                            // Broadcast to admin clients
-                            if let Some(msg) = broadcast_msg {
-                                broadcast(&admin_state, &msg).await;
+                                // Track QoS metrics
+                                if let Some(last) = qos_last_seq {
+                                    if frame.sequence <= last {
+                                        qos_ooo += 1;
+                                    } else if frame.sequence > last + 1 {
+                                        qos_gaps += (frame.sequence - last - 1) as u64;
+                                    }
+                                }
+                                qos_last_seq = Some(frame.sequence);
+                                qos_frames += 1;
+                                qos_bytes += data.len() as u64;
+
+                                // Cache keyframes for late RTSP clients
+                                if frame.is_keyframe {
+                                    *cached_keyframe.lock().unwrap() = Some(frame.clone());
+                                }
+
+                                // Send to RTSP pipeline
+                                if let Some(tx) = frame_tx.lock().unwrap().as_ref() {
+                                    let _ = tx.send(frame);
+                                }
                             }
-
-                            print!("> ");
-                            io::stdout().flush().unwrap();
                         }
                         Err(e) => {
                             println!("\n[{}] Disconnected: {}", node_name, e);
@@ -706,9 +659,6 @@ async fn handle_connection(
                 }
             }
         }
-
-        // Cancel video receiver when disconnected
-        video_handle.abort();
 
         // Remove relay and node on disconnect
         mounts.remove_factory(&mount_path);

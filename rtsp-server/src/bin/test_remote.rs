@@ -1,9 +1,9 @@
 //! Test Remote - Fake ONVIF Camera with Test Card
 //!
 //! Simulates an ONVIF camera for testing:
-//! - RTSP server with videotestsrc (port 8555)
-//! - ONVIF HTTP server for PTZ commands (port 8081)
-//! - QUIC client to connect to central
+//! - Generates test pattern video via GStreamer
+//! - Streams video over QUIC (stream-per-frame) to central
+//! - ONVIF HTTP server for PTZ commands (port 8082)
 
 use anyhow::Result;
 use axum::{
@@ -15,12 +15,14 @@ use axum::{
 };
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use gstreamer::prelude::*;
-use gstreamer_rtsp_server::prelude::*;
+use gstreamer_app::AppSink;
 use onvif_server::{extract_position, extract_soap_action, extract_velocity, get_local_ip, soap_fault};
 use quinn::{ClientConfig, Endpoint};
 use std::env;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
 /// Simulated PTZ position
 #[derive(Debug, Clone, Copy, Default)]
@@ -67,23 +69,21 @@ fn main() -> Result<()> {
 
     let node_name = args.get(1).map(|s| s.as_str()).unwrap_or("test-cam");
     let central_addr = args.get(2).map(|s| s.as_str());
-    let rtsp_port = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(8555u16);
-    let onvif_port = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(8082u16);
+    let onvif_port = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(8082u16);
 
     println!("==========================================");
-    println!("TEST REMOTE - Fake ONVIF Camera");
+    println!("TEST REMOTE - Fake ONVIF Camera (QUIC)");
     println!("==========================================");
     println!();
-    println!("Usage: test_remote [name] [central:port] [rtsp_port] [onvif_port]");
+    println!("Usage: test_remote [name] [central:port] [onvif_port]");
     println!();
     println!("Configuration:");
     println!("  Node name:   {}", node_name);
-    println!("  RTSP port:   {}", rtsp_port);
     println!("  ONVIF port:  {}", onvif_port);
     if let Some(addr) = &central_addr {
         println!("  Central:     {}", addr);
     } else {
-        println!("  Central:     (standalone mode)");
+        println!("  Central:     (required for QUIC streaming)");
     }
     println!();
 
@@ -97,7 +97,6 @@ fn main() -> Result<()> {
         .block_on(async_main(
             node_name.to_string(),
             central_addr.map(|s| s.to_string()),
-            rtsp_port,
             onvif_port,
         ))
 }
@@ -105,71 +104,116 @@ fn main() -> Result<()> {
 async fn async_main(
     node_name: String,
     central_addr: Option<String>,
-    rtsp_port: u16,
     onvif_port: u16,
 ) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    // Require central address for QUIC streaming
+    let central = match central_addr {
+        Some(addr) => addr,
+        None => {
+            eprintln!("Error: central address required for QUIC streaming");
+            eprintln!("Usage: test_remote [name] [central:port] [onvif_port]");
+            return Ok(());
+        }
+    };
+
     // Shared camera state
     let camera_state = Arc::new(Mutex::new(TestCameraState::default()));
 
-    // Create RTSP server with test pattern
-    let rtsp_server = gstreamer_rtsp_server::RTSPServer::new();
-    rtsp_server.set_service(&rtsp_port.to_string());
-    let mounts = rtsp_server.mount_points().expect("Failed to get mount points");
+    // Channel for video frames
+    let (frame_tx, mut frame_rx) = mpsc::channel::<quic_video::VideoFrame>(60);
+    let seq = Arc::new(AtomicU32::new(0));
 
-    // Create factory with test pattern - dynamic pipeline like real remote
-    let factory = gstreamer_rtsp_server::RTSPMediaFactory::new();
+    // Build GStreamer pipeline: videotestsrc -> encode -> appsink
+    let pipe = gstreamer::Pipeline::new();
     let params = camera_state.lock().unwrap().params.clone();
-    let pipeline = format!(
-        "( videotestsrc is-live=true pattern=smpte \
-           ! video/x-raw,width=1920,height=1080,framerate=30/1 \
-           ! videoconvert \
-           ! videoscale \
-           ! videorate \
-           ! capsfilter name=caps caps=video/x-raw,width={},height={},framerate={}/1 \
-           ! x264enc name=encoder bitrate={} tune=zerolatency speed-preset=ultrafast \
-           ! rtph264pay name=pay0 pt=96 )",
-        params.width, params.height, params.framerate, params.bitrate
-    );
-    factory.set_launch(&pipeline);
-    factory.set_shared(true);
 
-    // Capture element references when media is configured
-    let state_clone = Arc::clone(&camera_state);
-    factory.connect_media_configure(move |_factory, media| {
-        let element = media.element();
-        if let Some(bin) = element.downcast_ref::<gstreamer::Bin>() {
-            let mut state = state_clone.lock().unwrap();
-            state.capsfilter = bin.by_name("caps");
-            state.encoder = bin.by_name("encoder");
-            if state.capsfilter.is_some() && state.encoder.is_some() {
-                println!("Pipeline elements captured for dynamic control");
+    let src = gstreamer::ElementFactory::make("videotestsrc")
+        .property("is-live", true)
+        .property_from_str("pattern", "smpte")
+        .build()?;
+    let srccaps = gstreamer::ElementFactory::make("capsfilter")
+        .property("caps", gstreamer::Caps::builder("video/x-raw")
+            .field("width", 1920i32).field("height", 1080i32)
+            .field("framerate", gstreamer::Fraction::new(30, 1)).build())
+        .build()?;
+    let convert = gstreamer::ElementFactory::make("videoconvert").build()?;
+    let scale = gstreamer::ElementFactory::make("videoscale").build()?;
+    let rate = gstreamer::ElementFactory::make("videorate").build()?;
+
+    let capsfilter = gstreamer::ElementFactory::make("capsfilter")
+        .name("caps")
+        .property("caps", gstreamer::Caps::builder("video/x-raw")
+            .field("width", params.width).field("height", params.height)
+            .field("framerate", gstreamer::Fraction::new(params.framerate, 1)).build())
+        .build()?;
+
+    let encoder = gstreamer::ElementFactory::make("x264enc")
+        .name("encoder")
+        .property("bitrate", params.bitrate)
+        .property_from_str("tune", "zerolatency")
+        .property_from_str("speed-preset", "ultrafast")
+        .property("key-int-max", 30u32)
+        .build()?;
+
+    let parser = gstreamer::ElementFactory::make("h264parse").build()?;
+    let sink = gstreamer::ElementFactory::make("appsink").build()?.dynamic_cast::<AppSink>().unwrap();
+    sink.set_sync(false);
+    sink.set_max_buffers(1);
+    sink.set_drop(true);
+    sink.set_caps(Some(&gstreamer::Caps::builder("video/x-h264")
+        .field("stream-format", "byte-stream").field("alignment", "au").build()));
+
+    pipe.add_many([&src, &srccaps, &convert, &scale, &rate, &capsfilter, &encoder, &parser, sink.upcast_ref()])?;
+    gstreamer::Element::link_many([&src, &srccaps, &convert, &scale, &rate, &capsfilter, &encoder, &parser, sink.upcast_ref()])?;
+
+    // Store element references for dynamic control
+    {
+        let mut state = camera_state.lock().unwrap();
+        state.capsfilter = Some(capsfilter.clone());
+        state.encoder = Some(encoder.clone());
+    }
+
+    // Set up appsink callback
+    let seq2 = Arc::clone(&seq);
+    sink.set_callbacks(gstreamer_app::AppSinkCallbacks::builder()
+        .new_sample(move |s| {
+            let sample = s.pull_sample().map_err(|_| gstreamer::FlowError::Error)?;
+            let buf = sample.buffer().ok_or(gstreamer::FlowError::Error)?;
+            let map = buf.map_readable().map_err(|_| gstreamer::FlowError::Error)?;
+            let n = seq2.fetch_add(1, Ordering::Relaxed);
+            let pts = buf.pts().map(|t| t.nseconds() / 11111).unwrap_or(0);
+            let key = !buf.flags().contains(gstreamer::BufferFlags::DELTA_UNIT);
+            let _ = frame_tx.try_send(quic_video::VideoFrame::new(n, pts, key, map.to_vec()));
+            Ok(gstreamer::FlowSuccess::Ok)
+        }).build());
+
+    // Bus message handler
+    let bus = pipe.bus().unwrap();
+    let node_name_bus = node_name.clone();
+    std::thread::spawn(move || {
+        for msg in bus.iter_timed(gstreamer::ClockTime::NONE) {
+            match msg.view() {
+                gstreamer::MessageView::Error(e) => {
+                    eprintln!("[{}] GST ERROR: {} {:?}", node_name_bus, e.error(), e.debug());
+                }
+                gstreamer::MessageView::StateChanged(s) => {
+                    if msg.src().map(|e| e.name().as_str().starts_with("pipeline")).unwrap_or(false) {
+                        println!("[{}] Pipeline: {:?} -> {:?}", node_name_bus, s.old(), s.current());
+                    }
+                }
+                _ => {}
             }
         }
     });
 
-    mounts.add_factory("/stream", factory);
-
-    // Get local IP for RTSP URL
-    let local_ip = get_local_ip().unwrap_or_else(|| "127.0.0.1".to_string());
-    let rtsp_url = format!("rtsp://{}:{}/stream", local_ip, rtsp_port);
-
-    // Run GLib main loop and RTSP server in a separate thread
-    let main_loop = glib::MainLoop::new(None, false);
-    let main_loop_clone = main_loop.clone();
-    std::thread::spawn(move || {
-        // Attach RTSP server in the GLib thread context
-        let _rtsp_id = rtsp_server.attach(None).expect("Failed to attach RTSP server");
-        main_loop_clone.run();
-    });
-
-    // Give the GLib loop a moment to start
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    println!("RTSP server started");
-    println!("  Stream URL: {}", rtsp_url);
+    pipe.set_state(gstreamer::State::Playing)?;
+    println!("GStreamer pipeline started (SMPTE test pattern)");
     println!();
+
+    // Get local IP
+    let local_ip = get_local_ip().unwrap_or_else(|| "127.0.0.1".to_string());
 
     // Start ONVIF HTTP server
     let camera_state_clone = Arc::clone(&camera_state);
@@ -182,127 +226,172 @@ async fn async_main(
     });
 
     println!("ONVIF server started");
-    println!("  Device service: http://{}:{}/onvif/device_service", local_ip, onvif_port);
-    println!("  Media service:  http://{}:{}/onvif/media_service", local_ip, onvif_port);
-    println!("  PTZ service:    http://{}:{}/onvif/ptz_service", local_ip, onvif_port);
+    println!("  PTZ service: http://{}:{}/onvif/ptz_service", local_ip, onvif_port);
     println!();
 
-    // Connect to central if specified
-    if let Some(central) = central_addr {
-        println!("Connecting to central node at {}...", central);
+    println!("Connecting to central node at {}...", central);
 
-        // Generate Ed25519 keypair for fingerprinting
-        let secret_bytes: [u8; 32] = rand::random();
-        let signing_key = SigningKey::from_bytes(&secret_bytes);
-        let verifying_key: VerifyingKey = (&signing_key).into();
-        let fingerprint = hex::encode(verifying_key.as_bytes());
+    // Generate Ed25519 keypair for fingerprinting
+    let secret_bytes: [u8; 32] = rand::random();
+    let signing_key = SigningKey::from_bytes(&secret_bytes);
+    let verifying_key: VerifyingKey = (&signing_key).into();
+    let fingerprint = hex::encode(verifying_key.as_bytes());
 
-        println!("Fingerprint: {}", &fingerprint[..32]);
+    println!("Fingerprint: {}", &fingerprint[..32]);
 
-        let mut crypto = quic_common::insecure_client_config();
-        crypto.alpn_protocols = vec![];
+    let mut crypto = quic_common::insecure_client_config();
+    crypto.alpn_protocols = vec![];
 
-        let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?;
-        let mut client_config = ClientConfig::new(Arc::new(quic_config));
+    let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?;
+    let mut client_config = ClientConfig::new(Arc::new(quic_config));
 
-        let mut transport_config = quinn::TransportConfig::default();
-        transport_config.max_concurrent_uni_streams(100_u8.into());
-        transport_config.max_concurrent_bidi_streams(100_u8.into());
-        transport_config.max_idle_timeout(None);
-        transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
-        client_config.transport_config(Arc::new(transport_config));
+    let mut transport_config = quinn::TransportConfig::default();
+    // High limit for stream-per-frame video
+    transport_config.max_concurrent_uni_streams(1000u32.into());
+    transport_config.max_concurrent_bidi_streams(100u32.into());
+    transport_config.max_idle_timeout(None);
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    client_config.transport_config(Arc::new(transport_config));
 
-        let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
-        let endpoint = Endpoint::client(bind_addr)?;
+    let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
+    let endpoint = Endpoint::client(bind_addr)?;
 
-        let remote_addr: SocketAddr = central.parse()?;
-        let connection = endpoint
-            .connect_with(client_config, remote_addr, "localhost")?
-            .await?;
+    let remote_addr: SocketAddr = central.parse()?;
+    let connection = endpoint
+        .connect_with(client_config, remote_addr, "localhost")?
+        .await?;
 
-        // Use the local address from the QUIC connection for RTSP URL
-        // This ensures we advertise the correct IP (e.g., Tailscale IP when connecting over Tailscale)
-        let connection_local_ip = connection.local_ip().map(|ip| ip.to_string())
-            .unwrap_or_else(|| local_ip.clone());
-        let advertised_rtsp_url = format!("rtsp://{}:{}/stream", connection_local_ip, rtsp_port);
+    println!("Connected to central node");
 
-        println!("Connected to central node");
-        println!("Advertising RTSP URL: {}", advertised_rtsp_url);
+    // Send authentication with VIDEO marker
+    let mut send_stream = connection.open_uni().await?;
+    let auth_request = format!("AUTH|{}|{}|VIDEO", node_name, fingerprint);
+    send_stream.write_all(auth_request.as_bytes()).await?;
+    send_stream.finish()?;
 
-        // Send authentication
-        let mut send_stream = connection.open_uni().await?;
-        let auth_request = format!("AUTH|{}|{}|{}", node_name, fingerprint, advertised_rtsp_url);
-        send_stream.write_all(auth_request.as_bytes()).await?;
-        send_stream.finish()?;
+    println!("Authentication sent, waiting for approval...");
 
-        println!("Authentication sent, waiting for approval...");
+    // Wait for response
+    let mut recv_stream = connection.accept_uni().await?;
+    let buffer = recv_stream.read_to_end(1024 * 1024).await?;
+    let response = String::from_utf8_lossy(&buffer);
 
-        // Wait for response
-        let mut recv_stream = connection.accept_uni().await?;
-        let buffer = recv_stream.read_to_end(1024 * 1024).await?;
-        let response = String::from_utf8_lossy(&buffer);
-
-        if response.starts_with("APPROVED") {
-            println!("Approved by central node!");
-
-            // Send confirmation
-            let mut confirm_stream = connection.open_uni().await?;
-            let confirmation = format!("CONFIRM|{}|Ready - Test Camera (SMPTE pattern)", node_name);
-            confirm_stream.write_all(confirmation.as_bytes()).await?;
-            confirm_stream.finish()?;
-
-            println!();
-            println!("==========================================");
-            println!("READY - Listening for commands");
-            println!("==========================================");
-            println!();
-
-            // Command loop
-            loop {
-                match connection.accept_uni().await {
-                    Ok(mut recv_stream) => {
-                        let buffer = recv_stream.read_to_end(1024 * 1024).await?;
-                        let msg = String::from_utf8_lossy(&buffer);
-
-                        if msg.starts_with("CMD|") {
-                            let cmd = msg.strip_prefix("CMD|").unwrap_or("");
-                            println!("Received command: {}", cmd);
-
-                            let result = handle_command(cmd, &camera_state);
-
-                            // Send result back
-                            let mut send_stream = connection.open_uni().await?;
-                            let response = match result {
-                                Ok(msg) => format!("RESULT|ok|{}", msg),
-                                Err(e) => format!("RESULT|error|{}", e),
-                            };
-                            send_stream.write_all(response.as_bytes()).await?;
-                            send_stream.finish()?;
-                        }
-                    }
-                    Err(e) => {
-                        println!("Disconnected from central: {}", e);
-                        break;
-                    }
-                }
-            }
-        } else if response.starts_with("DENIED") {
+    if !response.starts_with("APPROVED") {
+        if response.starts_with("DENIED") {
             println!("Denied by central node: {}", response);
         } else {
             println!("Unexpected response: {}", response);
         }
-    } else {
-        // Standalone mode - just run RTSP and ONVIF servers
-        println!("Running in standalone mode (no central connection)");
-        println!("Press Ctrl+C to exit");
-        println!();
-
-        // Keep running
-        tokio::signal::ctrl_c().await?;
-        println!("\nShutting down...");
+        return Ok(());
     }
 
-    main_loop.quit();
+    println!("Approved by central node!");
+
+    // Send confirmation
+    let mut confirm_stream = connection.open_uni().await?;
+    let confirmation = format!("CONFIRM|{}|Ready - Test Camera (SMPTE pattern)", node_name);
+    confirm_stream.write_all(confirmation.as_bytes()).await?;
+    confirm_stream.finish()?;
+
+    // Send VIDEO_STREAM marker
+    let mut marker_stream = connection.open_uni().await?;
+    marker_stream.write_all(b"VIDEO_STREAM").await?;
+    marker_stream.finish()?;
+
+    println!();
+    println!("==========================================");
+    println!("READY - Streaming video (stream-per-frame)");
+    println!("==========================================");
+    println!();
+
+    // Spawn video sender task - one QUIC stream per frame
+    let node_name_video = node_name.clone();
+    let conn_clone = connection.clone();
+    let video_handle = tokio::spawn(async move {
+        let mut frame_count = 0u64;
+        let mut bytes_sent = 0u64;
+        let mut last_report_time = std::time::Instant::now();
+        let mut last_report_bytes = 0u64;
+
+        while let Some(frame) = frame_rx.recv().await {
+            let encoded = frame.encode();
+            let frame_size = encoded.len();
+
+            // Open new stream for this frame
+            let stream_result = conn_clone.open_uni().await;
+            let mut stream = match stream_result {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            if stream.write_all(&encoded).await.is_err() {
+                break;
+            }
+            if stream.finish().is_err() {
+                break;
+            }
+
+            frame_count += 1;
+            bytes_sent += frame_size as u64;
+
+            if frame_count % 30 == 0 {
+                let now = std::time::Instant::now();
+                let interval_secs = now.duration_since(last_report_time).as_secs_f64();
+                let interval_bytes = bytes_sent - last_report_bytes;
+                let mbps = if interval_secs > 0.0 {
+                    (interval_bytes as f64 * 8.0) / (interval_secs * 1_000_000.0)
+                } else {
+                    0.0
+                };
+
+                println!(
+                    "[{}] {} frames, {:.1} MB total, {:.2} Mbps{}",
+                    node_name_video,
+                    frame_count,
+                    bytes_sent as f64 / 1_000_000.0,
+                    mbps,
+                    if frame.is_keyframe { " [KEY]" } else { "" }
+                );
+
+                last_report_time = now;
+                last_report_bytes = bytes_sent;
+            }
+        }
+
+        println!("[{}] Video stream ended", node_name_video);
+    });
+
+    // Command loop
+    loop {
+        match connection.accept_uni().await {
+            Ok(mut recv_stream) => {
+                let buffer = recv_stream.read_to_end(1024 * 1024).await?;
+                let msg = String::from_utf8_lossy(&buffer);
+
+                if msg.starts_with("CMD|") {
+                    let cmd = msg.strip_prefix("CMD|").unwrap_or("");
+                    println!("Received command: {}", cmd);
+
+                    let result = handle_command(cmd, &camera_state);
+
+                    // Send result back
+                    let mut send_stream = connection.open_uni().await?;
+                    let response = match result {
+                        Ok(msg) => format!("RESULT|ok|{}", msg),
+                        Err(e) => format!("RESULT|error|{}", e),
+                    };
+                    send_stream.write_all(response.as_bytes()).await?;
+                    send_stream.finish()?;
+                }
+            }
+            Err(e) => {
+                println!("Disconnected from central: {}", e);
+                break;
+            }
+        }
+    }
+
+    video_handle.abort();
+    pipe.set_state(gstreamer::State::Null)?;
     Ok(())
 }
 

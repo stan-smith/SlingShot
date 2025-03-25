@@ -368,8 +368,9 @@ async fn async_main(node_name: String, central_addr: String, camera: CameraConfi
     let mut client_config = ClientConfig::new(Arc::new(quic_config));
 
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_concurrent_uni_streams(100_u8.into());
-    transport_config.max_concurrent_bidi_streams(100_u8.into());
+    // High limit for stream-per-frame video (30fps = 30 streams/sec)
+    transport_config.max_concurrent_uni_streams(1000u32.into());
+    transport_config.max_concurrent_bidi_streams(100u32.into());
     transport_config.max_idle_timeout(None);
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
     client_config.transport_config(Arc::new(transport_config));
@@ -407,20 +408,20 @@ async fn async_main(node_name: String, central_addr: String, camera: CameraConfi
         confirm_stream.write_all(confirmation.as_bytes()).await?;
         confirm_stream.finish()?;
 
-        // Open dedicated QUIC stream for video
-        let mut video_stream = connection.open_uni().await?;
-
-        // Send VIDEO_START marker so central knows this is a video stream
-        video_stream.write_all(b"VIDEO_START").await?;
+        // Send VIDEO_STREAM marker so central knows to expect stream-per-frame video
+        let mut marker_stream = connection.open_uni().await?;
+        marker_stream.write_all(b"VIDEO_STREAM").await?;
+        marker_stream.finish()?;
 
         println!();
         println!("==========================================");
-        println!("READY - Streaming video over QUIC");
+        println!("READY - Streaming video (stream-per-frame)");
         println!("==========================================");
         println!();
 
-        // Spawn video sender task
+        // Spawn video sender task - one QUIC stream per frame
         let node_name_clone = node_name.clone();
+        let conn_clone = connection.clone();
         let video_handle = tokio::spawn(async move {
             let mut frame_rx = frame_rx;
             let mut frame_count = 0u64;
@@ -432,23 +433,21 @@ async fn async_main(node_name: String, central_addr: String, camera: CameraConfi
                 let encoded = frame.encode();
                 let frame_size = encoded.len();
 
-                // Log every frame for debugging desync
-                if frame_count < 5 || frame_count % 500 == 0 || frame.sequence > 2630 {
-                    eprintln!("[SEND:{}] seq={} len={} first8={:02X?}",
-                        node_name_clone, frame.sequence, frame_size, &encoded[..8.min(encoded.len())]);
-                }
-
-                // Write length prefix (4 bytes) + frame data
-                let len_bytes = (frame_size as u32).to_be_bytes();
-                if video_stream.write_all(&len_bytes).await.is_err() {
+                // Open new stream for this frame, write, finish
+                let stream_result = conn_clone.open_uni().await;
+                let mut stream = match stream_result {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                if stream.write_all(&encoded).await.is_err() {
                     break;
                 }
-                if video_stream.write_all(&encoded).await.is_err() {
+                if stream.finish().is_err() {
                     break;
                 }
 
                 frame_count += 1;
-                bytes_sent += (4 + frame_size) as u64; // 4 len + data
+                bytes_sent += frame_size as u64;
 
                 // Print stats every 30 frames (about once per second)
                 if frame_count % 30 == 0 {

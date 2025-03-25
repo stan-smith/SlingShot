@@ -9,6 +9,8 @@ members = [
     "quic-video",
     "gst-bridge",
     "quic-video-poc",
+    "quic-video-test",
+    "quic-video-stream",
     "onvif-server",
     "onvif-client",
     "admin-web",

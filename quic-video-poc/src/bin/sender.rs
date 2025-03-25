@@ -86,6 +86,7 @@ async fn main() -> Result<()> {
 
     // Set up appsink callback
     let frame_tx_clone = frame_tx.clone();
+    let sequence = std::sync::atomic::AtomicU32::new(0);
     appsink.set_callbacks(
         gstreamer_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
@@ -93,10 +94,11 @@ async fn main() -> Result<()> {
                 let buffer = sample.buffer().ok_or(gstreamer::FlowError::Error)?;
                 let map = buffer.map_readable().map_err(|_| gstreamer::FlowError::Error)?;
 
+                let seq = sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let pts = buffer.pts().map(|t| t.nseconds() / 11111).unwrap_or(0); // ns to 90kHz
                 let is_keyframe = !buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT);
 
-                let frame = quic_video::VideoFrame::new(pts, is_keyframe, map.as_slice().to_vec());
+                let frame = quic_video::VideoFrame::new(seq, pts, is_keyframe, map.as_slice().to_vec());
 
                 // Non-blocking send
                 let _ = frame_tx_clone.try_send(frame);
