@@ -17,7 +17,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
 use onvif_server::{extract_position, extract_soap_action, extract_velocity, get_local_ip, soap_fault};
-use quinn::{ClientConfig, Endpoint};
+use quinn::Endpoint;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -239,19 +239,7 @@ async fn async_main(
 
     println!("Fingerprint: {}", &fingerprint[..32]);
 
-    let mut crypto = quic_common::insecure_client_config();
-    crypto.alpn_protocols = vec![];
-
-    let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?;
-    let mut client_config = ClientConfig::new(Arc::new(quic_config));
-
-    let mut transport_config = quinn::TransportConfig::default();
-    // High limit for stream-per-frame video
-    transport_config.max_concurrent_uni_streams(1000u32.into());
-    transport_config.max_concurrent_bidi_streams(100u32.into());
-    transport_config.max_idle_timeout(None);
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
-    client_config.transport_config(Arc::new(transport_config));
+    let client_config = quic_common::create_client_config()?;
 
     let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
     let endpoint = Endpoint::client(bind_addr)?;

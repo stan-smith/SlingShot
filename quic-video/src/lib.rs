@@ -5,6 +5,7 @@
 //! Uses sync markers to allow recovery from framing desync.
 
 use crc32fast::Hasher;
+use std::time::{Duration, Instant};
 
 /// Magic sync marker at the start of each frame (chosen to be unlikely in H.264 data)
 /// 0xCAFEBABE is a classic magic number, easy to spot in hex dumps
@@ -206,6 +207,100 @@ impl SequenceTracker {
 }
 
 impl Default for SequenceTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// QoS metrics for video stream monitoring
+///
+/// Tracks frame delivery statistics including gaps, out-of-order delivery,
+/// drops, and bitrate. Reports can be printed periodically.
+pub struct QosMetrics {
+    last_seq: Option<u32>,
+    frames_received: u64,
+    frames_dropped: u64,
+    gaps: u64,
+    out_of_order: u64,
+    bytes_received: u64,
+    start_time: Instant,
+    last_report: Instant,
+    report_interval: Duration,
+}
+
+impl QosMetrics {
+    /// Create new QoS metrics tracker with 5-second report interval
+    pub fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            last_seq: None,
+            frames_received: 0,
+            frames_dropped: 0,
+            gaps: 0,
+            out_of_order: 0,
+            bytes_received: 0,
+            start_time: now,
+            last_report: now,
+            report_interval: Duration::from_secs(5),
+        }
+    }
+
+    /// Record a received frame, tracking sequence gaps
+    pub fn record(&mut self, seq: u32, size: usize) {
+        if let Some(last) = self.last_seq {
+            if seq <= last {
+                self.out_of_order += 1;
+            } else if seq > last + 1 {
+                self.gaps += (seq - last - 1) as u64;
+            }
+        }
+        self.last_seq = Some(seq);
+        self.frames_received += 1;
+        self.bytes_received += size as u64;
+    }
+
+    /// Record a dropped frame
+    pub fn drop_frame(&mut self) {
+        self.frames_dropped += 1;
+    }
+
+    /// Check if report is due and return formatted string if so
+    pub fn report_if_due(&mut self) -> Option<String> {
+        if self.last_report.elapsed() >= self.report_interval {
+            let report = self.format_report();
+            self.last_report = Instant::now();
+            Some(report)
+        } else {
+            None
+        }
+    }
+
+    /// Format the current metrics as a report string
+    pub fn format_report(&self) -> String {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let fps = self.frames_received as f64 / elapsed;
+        let total = self.frames_received + self.gaps;
+        let loss = if total > 0 { (self.gaps as f64 / total as f64) * 100.0 } else { 0.0 };
+        let mbps = (self.bytes_received as f64 * 8.0) / (elapsed * 1_000_000.0);
+        format!(
+            "fps={:.1} loss={:.1}% gaps={} ooo={} dropped={} bitrate={:.2}mbps",
+            fps, loss, self.gaps, self.out_of_order, self.frames_dropped, mbps
+        )
+    }
+
+    /// Get frames received count
+    pub fn frames_received(&self) -> u64 { self.frames_received }
+    /// Get gaps count
+    pub fn gaps(&self) -> u64 { self.gaps }
+    /// Get out-of-order count
+    pub fn out_of_order(&self) -> u64 { self.out_of_order }
+    /// Get dropped frames count
+    pub fn frames_dropped(&self) -> u64 { self.frames_dropped }
+    /// Get bytes received
+    pub fn bytes_received(&self) -> u64 { self.bytes_received }
+}
+
+impl Default for QosMetrics {
     fn default() -> Self {
         Self::new()
     }

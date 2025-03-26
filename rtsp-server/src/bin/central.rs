@@ -98,15 +98,7 @@ async fn async_main() -> Result<()> {
 
     let quic_server_config = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?;
     let mut server_config = ServerConfig::with_crypto(Arc::new(quic_server_config));
-
-    let mut transport_config = quinn::TransportConfig::default();
-    // High limit for stream-per-frame video (30fps = 30 streams/sec per node)
-    transport_config.max_concurrent_uni_streams(1000u32.into());
-    transport_config.max_concurrent_bidi_streams(100u32.into());
-    // Keep connection alive indefinitely
-    transport_config.max_idle_timeout(None);
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
-    server_config.transport_config(Arc::new(transport_config));
+    server_config.transport_config(Arc::new(quic_common::video_transport_config()));
 
     let bind_addr: SocketAddr = "0.0.0.0:5001".parse()?;
     let endpoint = Endpoint::server(server_config, bind_addr)?;
@@ -519,14 +511,7 @@ async fn handle_connection(
         broadcast(&admin_state, &format!("CONNECTED|{}", node_name)).await;
 
         // QoS metrics for this node
-        let mut qos_frames: u64 = 0;
-        let mut qos_bytes: u64 = 0;
-        let mut qos_gaps: u64 = 0;
-        let mut qos_ooo: u64 = 0;
-        let mut qos_dropped: u64 = 0;
-        let mut qos_last_seq: Option<u32> = None;
-        let qos_start = std::time::Instant::now();
-        let mut qos_last_report = std::time::Instant::now();
+        let mut qos = quic_video::QosMetrics::new();
 
         // Cache keyframe for late RTSP clients
         let cached_keyframe: Arc<std::sync::Mutex<Option<quic_video::VideoFrame>>> =
@@ -541,15 +526,8 @@ async fn handle_connection(
                     quic_metrics::log_stats(&connection, &node_name);
 
                     // Print QoS metrics every 5 seconds
-                    if qos_last_report.elapsed().as_secs() >= 5 {
-                        let elapsed = qos_start.elapsed().as_secs_f64();
-                        let fps = qos_frames as f64 / elapsed;
-                        let total = qos_frames + qos_gaps;
-                        let loss = if total > 0 { (qos_gaps as f64 / total as f64) * 100.0 } else { 0.0 };
-                        let mbps = (qos_bytes as f64 * 8.0) / (elapsed * 1_000_000.0);
-                        println!("[{}:QoS] fps={:.1} loss={:.1}% gaps={} ooo={} dropped={} bitrate={:.2}mbps",
-                            node_name, fps, loss, qos_gaps, qos_ooo, qos_dropped, mbps);
-                        qos_last_report = std::time::Instant::now();
+                    if let Some(report) = qos.report_if_due() {
+                        println!("[{}:QoS] {}", node_name, report);
                     }
                 }
 
@@ -568,7 +546,7 @@ async fn handle_connection(
                                 Ok(d) => d,
                                 Err(e) => {
                                     eprintln!("[{}] Stream read error: {}", node_name, e);
-                                    qos_dropped += 1;
+                                    qos.drop_frame();
                                     continue;
                                 }
                             };
@@ -623,22 +601,13 @@ async fn handle_connection(
                                     Ok(f) => f,
                                     Err(e) => {
                                         eprintln!("[{}] Frame decode error: {}", node_name, e);
-                                        qos_dropped += 1;
+                                        qos.drop_frame();
                                         continue;
                                     }
                                 };
 
                                 // Track QoS metrics
-                                if let Some(last) = qos_last_seq {
-                                    if frame.sequence <= last {
-                                        qos_ooo += 1;
-                                    } else if frame.sequence > last + 1 {
-                                        qos_gaps += (frame.sequence - last - 1) as u64;
-                                    }
-                                }
-                                qos_last_seq = Some(frame.sequence);
-                                qos_frames += 1;
-                                qos_bytes += data.len() as u64;
+                                qos.record(frame.sequence, data.len());
 
                                 // Cache keyframes for late RTSP clients
                                 if frame.is_keyframe {
