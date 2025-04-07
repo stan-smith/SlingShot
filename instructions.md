@@ -9,7 +9,7 @@ Its username is "root" its password is "MINI_VScam00"
 it is an Axis camera
 The camera is known working.
 The device "khadas" is reached over tailscale.
-when you make changes to the "remote" you need to use rsync to move the changes over, you will use the path "khadas@khadas:~/rtsp-server-remote"
+when you make changes to the "remote" you need to use rsync to move the changes over, you will use the path "khadas@khadas:~/remote"
 you will not send over the target directory because khadas is a different architecture to this machine, it is an aarch64 machine, this machine is x86_64
 If you have any quesitons, ask me, I always prefer you to seek clarity rather than make rash decisions.
 When debugging, if something is not working, despite repeated attempts, let me know, and we will reassess it together.

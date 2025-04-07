@@ -1,7 +1,7 @@
 mod storage;
 
 use anyhow::Result;
-use ffmpeg_recorder::{has_disk_space, Recorder, RecorderConfig};
+use ffmpeg_recorder::{ensure_disk_space, Recorder, RecorderConfig};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
@@ -506,11 +506,13 @@ async fn async_main(node_name: String, central_addr: String, camera: CameraConfi
                         if let Err(e) = rec.check_and_restart() {
                             eprintln!("Recorder error: {}", e);
                         }
-                        if !has_disk_space(&rec.config().output_dir, rec.config().disk_reserve_percent) {
-                            eprintln!("WARNING: Disk space low, stopping recording");
-                            if let Err(e) = rec.stop() {
-                                eprintln!("Failed to stop recorder: {}", e);
-                            }
+                        // Ensure disk space by deleting old recordings if needed
+                        if let Err(e) = ensure_disk_space(
+                            &rec.config().output_dir,
+                            rec.config().disk_reserve_percent,
+                            &rec.config().file_format,
+                        ) {
+                            eprintln!("WARNING: Could not ensure disk space: {}", e);
                         }
                     }
                 }

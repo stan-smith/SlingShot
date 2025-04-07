@@ -1,13 +1,14 @@
 [package]
-name = "rtsp-server-remote"
+name = "central"
 version = "0.1.0"
 edition = "2021"
 
 
 [dependencies]
-# GStreamer for RTSP server
+# GStreamer for RTSP
 gstreamer = "0.23"
 gstreamer-rtsp-server = "0.23"
+gstreamer-app = "0.23"
 glib = "0.20"
 
 # QUIC transport
@@ -27,11 +28,14 @@ tokio = { version = "1", features = ["full"] }
 # Error handling
 anyhow = "1"
 
-# ONVIF client
-onvif-client = { path = "../onvif-client" }
+# ONVIF server
+onvif-server = { path = "../onvif-server" }
 
-# FFmpeg recording
-ffmpeg-recorder = { path = "../ffmpeg-recorder" }
+# Admin web interface
+admin-web = { path = "../admin-web" }
+
+# HTTP server (for test_remote)
+axum = "0.8"
 
 # QUIC common utilities
 quic-common = { path = "../quic-common" }
@@ -42,8 +46,14 @@ quic-metrics = { path = "../quic-metrics" }
 # QUIC video transport
 quic-video = { path = "../quic-video" }
 
-# GStreamer bridge
-gst-bridge = { path = "../gst-bridge" }
+[[bin]]
+name = "rtsp-server"
+path = "src/main.rs"
 
-# GStreamer app elements
-gstreamer-app = "0.23"
+[[bin]]
+name = "central"
+path = "src/bin/central.rs"
+
+[[bin]]
+name = "test_remote"
+path = "src/bin/test_remote.rs"

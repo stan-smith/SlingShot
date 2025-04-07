@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "rtsp-server",
-    "rtsp-server-remote",
+    "central",
+    "remote",
     "quic-common",
     "quic-auth",
     "quic-metrics",
