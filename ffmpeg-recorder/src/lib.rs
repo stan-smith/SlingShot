@@ -39,8 +39,8 @@ pub mod config;
 pub mod recorder;
 
 pub use cleanup::{
-    disk_usage_summary, format_bytes, get_available_bytes, get_disk_usage, get_total_bytes,
-    has_disk_space, DiskError,
+    delete_oldest_recording, disk_usage_summary, ensure_disk_space, format_bytes,
+    get_available_bytes, get_disk_usage, get_total_bytes, has_disk_space, DiskError,
 };
 pub use config::{ConfigError, RecorderConfig};
 pub use recorder::{Recorder, RecorderError};

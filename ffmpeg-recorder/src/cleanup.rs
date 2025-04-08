@@ -1,4 +1,60 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Delete the oldest recording file in the given directory
+/// Returns the path of the deleted file, or None if no files found
+pub fn delete_oldest_recording(dir: &Path, file_format: &str) -> Result<Option<PathBuf>, DiskError> {
+    // Find all recording files
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| DiskError::IoError(e.to_string()))?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry.path().extension()
+                .map(|ext| ext == file_format)
+                .unwrap_or(false)
+        })
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            let modified = metadata.modified().ok()?;
+            Some((entry.path(), modified))
+        })
+        .collect();
+
+    if files.is_empty() {
+        return Ok(None);
+    }
+
+    // Sort by modified time (oldest first)
+    files.sort_by_key(|(_, modified)| *modified);
+
+    // Delete the oldest file
+    let (oldest_path, _) = &files[0];
+    let deleted_path = oldest_path.clone();
+
+    std::fs::remove_file(oldest_path)
+        .map_err(|e| DiskError::IoError(format!("Failed to delete {}: {}", oldest_path.display(), e)))?;
+
+    Ok(Some(deleted_path))
+}
+
+/// Ensure disk space by deleting oldest recordings until space is available
+/// Returns the number of files deleted
+pub fn ensure_disk_space(dir: &Path, reserve_percent: u8, file_format: &str) -> Result<usize, DiskError> {
+    let mut deleted_count = 0;
+
+    while !has_disk_space(dir, reserve_percent) {
+        match delete_oldest_recording(dir, file_format)? {
+            Some(path) => {
+                eprintln!("Deleted old recording to free space: {}", path.display());
+                deleted_count += 1;
+            }
+            None => {
+                return Err(DiskError::NoFilesToDelete);
+            }
+        }
+    }
+
+    Ok(deleted_count)
+}
 
 /// Check if there's enough disk space to continue recording
 /// Returns true if disk usage is below the reserve threshold
@@ -93,6 +149,10 @@ pub enum DiskError {
     StatvfsFailed(String),
     #[error("Invalid filesystem")]
     InvalidFilesystem,
+    #[error("IO error: {0}")]
+    IoError(String),
+    #[error("No recording files to delete")]
+    NoFilesToDelete,
 }
 
 #[cfg(test)]
