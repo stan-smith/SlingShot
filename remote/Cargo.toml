@@ -38,3 +38,6 @@ quic-metrics = { path = "../quic-metrics" }
 
 # QUIC video transport
 quic-video = { path = "../quic-video" }
+
+# Recording retrieval
+recording-retrieval = { path = "../recording-retrieval" }

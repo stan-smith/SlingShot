@@ -1,0 +1,11 @@
+[package]
+name = "recording-retrieval"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+crc32fast = "1.4"
+tokio = { version = "1", features = ["fs", "io-util"] }
+quinn = "0.11"

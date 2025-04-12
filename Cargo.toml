@@ -17,4 +17,5 @@ members = [
     "storage-mount",
     "storage-selector",
     "ffmpeg-recorder",
+    "recording-retrieval",
 ]

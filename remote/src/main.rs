@@ -1,12 +1,15 @@
 mod storage;
 
 use anyhow::Result;
-use ffmpeg_recorder::{ensure_disk_space, Recorder, RecorderConfig};
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use ffmpeg_recorder::{ensure_disk_space, Recorder, RecorderConfig};
 use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
 use onvif_client::OnvifClient;
 use quinn::Endpoint;
+use recording_retrieval::{
+    find_recordings_in_range, format_size, parse_time_range, FileTransferSender, TransferError,
+};
 use std::env;
 use std::io::{self, BufRead, Write};
 use std::net::SocketAddr;
@@ -479,16 +482,33 @@ async fn async_main(node_name: String, central_addr: String, camera: CameraConfi
                                 let cmd = msg.strip_prefix("CMD|").unwrap_or("");
                                 println!("Received command: {}", cmd);
 
-                                let result = handle_command(cmd, &onvif, &pipeline_state);
+                                // Check for recordings command (needs special handling)
+                                let parts: Vec<&str> = cmd.split_whitespace().collect();
+                                if !parts.is_empty() && parts[0].to_lowercase() == "recordings" {
+                                    let storage = storage::Storage::new();
+                                    let conn_clone = connection.clone();
 
-                                // Send result back
-                                let mut send_stream = connection.open_uni().await?;
-                                let response = match result {
-                                    Ok(msg) => format!("RESULT|ok|{}", msg),
-                                    Err(e) => format!("RESULT|error|{}", e),
-                                };
-                                send_stream.write_all(response.as_bytes()).await?;
-                                send_stream.finish()?;
+                                    // Handle recordings command
+                                    let response = match handle_recordings_command(&parts[1..], &storage, &conn_clone).await {
+                                        Ok(msg) => format!("RESULT|ok|{}", msg),
+                                        Err(e) => format!("RESULT|error|{}", e),
+                                    };
+
+                                    let mut send_stream = connection.open_uni().await?;
+                                    send_stream.write_all(response.as_bytes()).await?;
+                                    send_stream.finish()?;
+                                } else {
+                                    let result = handle_command(cmd, &onvif, &pipeline_state);
+
+                                    // Send result back
+                                    let mut send_stream = connection.open_uni().await?;
+                                    let response = match result {
+                                        Ok(msg) => format!("RESULT|ok|{}", msg),
+                                        Err(e) => format!("RESULT|error|{}", e),
+                                    };
+                                    send_stream.write_all(response.as_bytes()).await?;
+                                    send_stream.finish()?;
+                                }
                             }
                         }
                         Err(e) => {
@@ -755,6 +775,87 @@ fn handle_ptz_command(parts: Vec<&str>, onvif: &Arc<Mutex<OnvifClient>>) -> Resu
 
         _ => Err(format!("Unknown command: {}. Try: ptz, stop, goto, status, info, home, left, right, up, down, zoomin, zoomout", parts[0])),
     }
+}
+
+/// Handle recordings retrieval command
+async fn handle_recordings_command(
+    args: &[&str],
+    storage: &storage::Storage,
+    connection: &quinn::Connection,
+) -> Result<String, String> {
+    // Check storage availability
+    let recordings_dir = storage
+        .recordings_path()
+        .ok_or("Storage not available")?;
+
+    if args.is_empty() {
+        return Err(
+            "Usage: recordings <N> <unit> ago | recordings since yesterday | recordings <ISO8601_from> <ISO8601_to>"
+                .to_string(),
+        );
+    }
+
+    // Parse time range
+    let range = parse_time_range(args).map_err(|e| e.to_string())?;
+
+    println!(
+        "[RECORDINGS] Searching for files from {} to {}",
+        range.from.format("%Y-%m-%d %H:%M:%S"),
+        range.to.format("%Y-%m-%d %H:%M:%S")
+    );
+
+    // Find matching recordings (30 second segments)
+    let files = find_recordings_in_range(&recordings_dir, &range, 30).map_err(|e| e.to_string())?;
+
+    if files.is_empty() {
+        return Err(format!(
+            "No recordings found between {} and {}",
+            range.from.format("%Y-%m-%d %H:%M:%S"),
+            range.to.format("%Y-%m-%d %H:%M:%S")
+        ));
+    }
+
+    let file_count = files.len();
+    let total_size: u64 = files.iter().map(|f| f.size_bytes).sum();
+
+    println!(
+        "[RECORDINGS] Found {} files ({})",
+        file_count,
+        format_size(total_size)
+    );
+
+    // Spawn file transfer task
+    let conn_clone = connection.clone();
+    let sender = FileTransferSender::new();
+    let request_id = sender.next_request_id();
+
+    tokio::spawn(async move {
+        match sender.send_files(&conn_clone, &files, request_id).await {
+            Ok(bytes) => {
+                println!(
+                    "[RECORDINGS] Transfer complete: {} bytes sent",
+                    format_size(bytes)
+                );
+            }
+            Err(e) => {
+                eprintln!("[RECORDINGS] Transfer failed: {}", e);
+                // Try to send error message
+                let _ = FileTransferSender::send_error(
+                    &conn_clone,
+                    request_id,
+                    TransferError::IO_ERROR,
+                    &e.to_string(),
+                )
+                .await;
+            }
+        }
+    });
+
+    Ok(format!(
+        "Found {} recordings ({}), transfer started",
+        file_count,
+        format_size(total_size)
+    ))
 }
 
 fn prompt_profile_selection(count: usize) -> Result<usize> {

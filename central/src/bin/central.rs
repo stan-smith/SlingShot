@@ -5,10 +5,15 @@ use gstreamer_app::AppSrc;
 use gstreamer_rtsp_server::prelude::*;
 use onvif_server::{get_local_ip, run_onvif_server, NodeHandle};
 use quinn::{Endpoint, ServerConfig};
+use recording_retrieval::{
+    decode_message_type, format_size, FileChunk, FileComplete, FileHeader, FileMessageType,
+    FileTransferReceiver, TransferComplete, TransferError, FILE_TRANSFER_MAGIC,
+};
 use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufRead, Write};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -517,6 +522,13 @@ async fn handle_connection(
         let cached_keyframe: Arc<std::sync::Mutex<Option<quic_video::VideoFrame>>> =
             Arc::new(std::sync::Mutex::new(None));
 
+        // File transfer receiver for this node
+        let output_dir = dirs::video_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("kaiju")
+            .join(&node_name);
+        let mut file_receiver = FileTransferReceiver::new(output_dir.clone());
+
         // Main loop: handle video frames, commands, and stats
         let mut stats_interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
@@ -556,9 +568,85 @@ async fn handle_connection(
                             }
 
                             // Peek first byte to determine stream type
-                            // ASCII printable (32-126) = command response, otherwise = video frame
+                            // 0x01 = file transfer, ASCII printable (32-126) = command response, otherwise = video frame
                             let first_byte = data[0];
-                            if first_byte >= 32 && first_byte <= 126 {
+                            if first_byte == FILE_TRANSFER_MAGIC {
+                                // File transfer message
+                                match decode_message_type(&data) {
+                                    Ok(FileMessageType::FileHeader) => {
+                                        match FileHeader::decode(&data) {
+                                            Ok(header) => {
+                                                println!(
+                                                    "[{}] Receiving file {}/{}: {} ({})",
+                                                    node_name,
+                                                    header.file_index + 1,
+                                                    header.total_files,
+                                                    header.filename,
+                                                    format_size(header.file_size)
+                                                );
+                                                if let Err(e) = file_receiver.start_file(header).await {
+                                                    eprintln!("[{}] Failed to start file: {}", node_name, e);
+                                                }
+                                            }
+                                            Err(e) => eprintln!("[{}] FileHeader decode error: {}", node_name, e),
+                                        }
+                                    }
+                                    Ok(FileMessageType::FileChunk) => {
+                                        match FileChunk::decode(&data) {
+                                            Ok(chunk) => {
+                                                if let Err(e) = file_receiver.receive_chunk(chunk).await {
+                                                    eprintln!("[{}] Chunk receive error: {}", node_name, e);
+                                                }
+                                            }
+                                            Err(e) => eprintln!("[{}] FileChunk decode error: {}", node_name, e),
+                                        }
+                                    }
+                                    Ok(FileMessageType::FileComplete) => {
+                                        match FileComplete::decode(&data) {
+                                            Ok(complete) => {
+                                                match file_receiver.complete_file(complete.request_id, complete.file_index).await {
+                                                    Ok(path) => {
+                                                        println!("[{}] Saved: {}", node_name, path.display());
+                                                        broadcast(&admin_state, &format!("[{}] Saved: {}", node_name, path.display())).await;
+                                                    }
+                                                    Err(e) => eprintln!("[{}] File complete error: {}", node_name, e),
+                                                }
+                                            }
+                                            Err(e) => eprintln!("[{}] FileComplete decode error: {}", node_name, e),
+                                        }
+                                    }
+                                    Ok(FileMessageType::TransferComplete) => {
+                                        match TransferComplete::decode(&data) {
+                                            Ok(complete) => {
+                                                println!(
+                                                    "[{}] Transfer complete: {} files ({})",
+                                                    node_name,
+                                                    complete.total_files,
+                                                    format_size(complete.total_bytes)
+                                                );
+                                                broadcast(&admin_state, &format!(
+                                                    "[{}] Transfer complete: {} files saved to {}",
+                                                    node_name, complete.total_files, output_dir.display()
+                                                )).await;
+                                            }
+                                            Err(e) => eprintln!("[{}] TransferComplete decode error: {}", node_name, e),
+                                        }
+                                    }
+                                    Ok(FileMessageType::TransferError) => {
+                                        match TransferError::decode(&data) {
+                                            Ok(error) => {
+                                                eprintln!("[{}] Transfer error: {}", node_name, error.message);
+                                                broadcast(&admin_state, &format!("[{}] Transfer error: {}", node_name, error.message)).await;
+                                            }
+                                            Err(e) => eprintln!("[{}] TransferError decode error: {}", node_name, e),
+                                        }
+                                    }
+                                    Ok(FileMessageType::TransferRequest) => {
+                                        // Central doesn't handle requests, only remote does
+                                    }
+                                    Err(e) => eprintln!("[{}] Unknown file transfer message: {}", node_name, e),
+                                }
+                            } else if first_byte >= 32 && first_byte <= 126 {
                                 // Command response (text)
                                 let msg = String::from_utf8_lossy(&data);
 
@@ -676,6 +764,15 @@ fn print_help() {
     println!("  <node> stop                  - Stop PTZ movement");
     println!("  <node> status                - Get PTZ position");
     println!("  <node> info                  - Get camera info");
+    println!();
+    println!("Recording Retrieval:");
+    println!("  <node> recordings 5 mins ago           - Retrieve last 5 minutes");
+    println!("  <node> recordings 2 hours ago          - Retrieve last 2 hours");
+    println!("  <node> recordings since yesterday      - Since midnight yesterday");
+    println!("  <node> recordings since midnight       - Since midnight today");
+    println!("  <node> recordings last hour            - Last 60 minutes");
+    println!("  <node> recordings <ISO8601> <ISO8601>  - Specific time range");
+    println!("  Files saved to: ~/Videos/kaiju/<node>/");
     println!();
     println!("  help                         - Show this help");
     println!("  quit                         - Exit");

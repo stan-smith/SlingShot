@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 /// Delete the oldest recording file in the given directory
-/// Returns the path of the deleted file, or None if no files found
-pub fn delete_oldest_recording(dir: &Path, file_format: &str) -> Result<Option<PathBuf>, DiskError> {
+/// Returns the path and size of the deleted file, or None if no files found
+pub fn delete_oldest_recording(dir: &Path, file_format: &str) -> Result<Option<(PathBuf, u64)>, DiskError> {
     // Find all recording files
     let mut files: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| DiskError::IoError(e.to_string()))?
@@ -15,7 +15,8 @@ pub fn delete_oldest_recording(dir: &Path, file_format: &str) -> Result<Option<P
         .filter_map(|entry| {
             let metadata = entry.metadata().ok()?;
             let modified = metadata.modified().ok()?;
-            Some((entry.path(), modified))
+            let size = metadata.len();
+            Some((entry.path(), modified, size))
         })
         .collect();
 
@@ -24,33 +25,58 @@ pub fn delete_oldest_recording(dir: &Path, file_format: &str) -> Result<Option<P
     }
 
     // Sort by modified time (oldest first)
-    files.sort_by_key(|(_, modified)| *modified);
+    files.sort_by_key(|(_, modified, _)| *modified);
 
     // Delete the oldest file
-    let (oldest_path, _) = &files[0];
+    let (oldest_path, _, size) = &files[0];
     let deleted_path = oldest_path.clone();
+    let deleted_size = *size;
 
     std::fs::remove_file(oldest_path)
         .map_err(|e| DiskError::IoError(format!("Failed to delete {}: {}", oldest_path.display(), e)))?;
 
-    Ok(Some(deleted_path))
+    Ok(Some((deleted_path, deleted_size)))
 }
 
 /// Ensure disk space by deleting oldest recordings until space is available
 /// Returns the number of files deleted
 pub fn ensure_disk_space(dir: &Path, reserve_percent: u8, file_format: &str) -> Result<usize, DiskError> {
     let mut deleted_count = 0;
+    let initial_usage = get_disk_usage(dir).ok();
+
+    if let Some(usage) = initial_usage {
+        if usage >= reserve_percent {
+            println!(
+                "[DISK CLEANUP] Disk at {}%, threshold {}% - starting cleanup",
+                usage, reserve_percent
+            );
+        }
+    }
 
     while !has_disk_space(dir, reserve_percent) {
         match delete_oldest_recording(dir, file_format)? {
-            Some(path) => {
-                eprintln!("Deleted old recording to free space: {}", path.display());
+            Some((path, size)) => {
+                let current_usage = get_disk_usage(dir).unwrap_or(0);
+                println!(
+                    "[DISK CLEANUP] Deleted {} ({}) - now at {}%",
+                    path.display(),
+                    format_bytes(size),
+                    current_usage
+                );
                 deleted_count += 1;
             }
             None => {
                 return Err(DiskError::NoFilesToDelete);
             }
         }
+    }
+
+    if deleted_count > 0 {
+        let final_usage = get_disk_usage(dir).unwrap_or(0);
+        println!(
+            "[DISK CLEANUP] Complete - deleted {} files, disk now at {}%",
+            deleted_count, final_usage
+        );
     }
 
     Ok(deleted_count)
