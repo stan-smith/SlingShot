@@ -14,8 +14,6 @@ pub const FILE_TRANSFER_MAGIC: u8 = 0x01;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileMessageType {
-    /// Request to transfer files (central -> remote)
-    TransferRequest = 0x10,
     /// Metadata for a file about to be sent
     FileHeader = 0x11,
     /// Chunk of file data
@@ -33,7 +31,6 @@ impl TryFrom<u8> for FileMessageType {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0x10 => Ok(FileMessageType::TransferRequest),
             0x11 => Ok(FileMessageType::FileHeader),
             0x12 => Ok(FileMessageType::FileChunk),
             0x13 => Ok(FileMessageType::FileComplete),
@@ -44,39 +41,6 @@ impl TryFrom<u8> for FileMessageType {
                 value
             ))),
         }
-    }
-}
-
-/// Transfer request sent from central to remote
-#[derive(Debug, Clone)]
-pub struct TransferRequest {
-    pub request_id: u32,
-    pub time_from: i64, // Unix timestamp
-    pub time_to: i64,   // Unix timestamp
-}
-
-impl TransferRequest {
-    /// Encode for wire transmission
-    /// Format: [magic:1][type:1][request_id:4][time_from:8][time_to:8] = 22 bytes
-    pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(22);
-        buf.push(FILE_TRANSFER_MAGIC);
-        buf.push(FileMessageType::TransferRequest as u8);
-        buf.extend_from_slice(&self.request_id.to_be_bytes());
-        buf.extend_from_slice(&self.time_from.to_be_bytes());
-        buf.extend_from_slice(&self.time_to.to_be_bytes());
-        buf
-    }
-
-    pub fn decode(data: &[u8]) -> Result<Self, RetrievalError> {
-        if data.len() < 22 || data[0] != FILE_TRANSFER_MAGIC {
-            return Err(RetrievalError::ProtocolError("Invalid TransferRequest".into()));
-        }
-        Ok(Self {
-            request_id: u32::from_be_bytes(data[2..6].try_into().unwrap()),
-            time_from: i64::from_be_bytes(data[6..14].try_into().unwrap()),
-            time_to: i64::from_be_bytes(data[14..22].try_into().unwrap()),
-        })
     }
 }
 

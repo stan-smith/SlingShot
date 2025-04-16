@@ -641,9 +641,6 @@ async fn handle_connection(
                                             Err(e) => eprintln!("[{}] TransferError decode error: {}", node_name, e),
                                         }
                                     }
-                                    Ok(FileMessageType::TransferRequest) => {
-                                        // Central doesn't handle requests, only remote does
-                                    }
                                     Err(e) => eprintln!("[{}] Unknown file transfer message: {}", node_name, e),
                                 }
                             } else if first_byte >= 32 && first_byte <= 126 {

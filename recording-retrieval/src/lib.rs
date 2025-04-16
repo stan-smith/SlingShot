@@ -13,7 +13,7 @@ pub use error::RetrievalError;
 pub use files::{find_recordings_in_range, list_all_recordings, RecordingFile};
 pub use protocol::{
     decode_message_type, FileChunk, FileComplete, FileHeader, FileMessageType, TransferComplete,
-    TransferError, TransferRequest, FILE_TRANSFER_MAGIC,
+    TransferError, FILE_TRANSFER_MAGIC,
 };
 pub use time::{parse_time_range, TimeRange};
 pub use transfer::{FileTransferReceiver, FileTransferSender};
