@@ -1,6 +1,7 @@
 mod storage;
 
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use ffmpeg_recorder::{ensure_disk_space, Recorder, RecorderConfig};
 use gstreamer::prelude::*;
@@ -10,7 +11,6 @@ use quinn::Endpoint;
 use recording_retrieval::{
     find_recordings_in_range, format_size, parse_time_range, FileTransferSender, TransferError,
 };
-use std::env;
 use std::io::{self, BufRead, Write};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -18,14 +18,47 @@ use tokio::sync::mpsc;
 
 /// Remote Node - Video Streamer with ONVIF Camera Control
 ///
-/// - Connects to an ONVIF camera and captures its stream
+/// - Connects to an ONVIF camera or direct RTSP stream
 /// - Connects to central node via QUIC for authentication, commands, and video
 /// - Sends video frames over QUIC (no local RTSP server needed)
-/// - Accepts PTZ commands to control the camera
-struct CameraConfig {
-    host: String,
-    user: String,
-    pass: String,
+/// - Accepts PTZ commands to control the camera (ONVIF only)
+
+#[derive(Parser)]
+#[command(name = "remote")]
+#[command(about = "Kaiju remote edge node - streams video to central node")]
+struct Cli {
+    /// Node name for identification
+    #[arg(short, long)]
+    name: String,
+
+    /// Central node address (ip:port)
+    #[arg(short, long)]
+    central: String,
+
+    #[command(subcommand)]
+    source: Source,
+}
+
+#[derive(Subcommand)]
+enum Source {
+    /// Connect to RTSP stream directly
+    Rtsp {
+        /// Full RTSP URL (credentials embedded, e.g. rtsp://user:pass@host/path)
+        #[arg(short, long)]
+        url: String,
+    },
+    /// Connect via ONVIF camera discovery
+    Onvif {
+        /// Camera IP address
+        #[arg(long)]
+        ip: String,
+        /// Camera username
+        #[arg(long)]
+        user: String,
+        /// Camera password
+        #[arg(long)]
+        pass: String,
+    },
 }
 
 /// Dynamic stream parameters
@@ -56,20 +89,7 @@ struct PipelineState {
 }
 
 fn main() -> Result<()> {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 6 {
-        eprintln!("Usage: {} <node-name> <central-ip:port> <camera-ip> <camera-user> <camera-pass>", args[0]);
-        eprintln!("Example: {} khadas 192.168.1.100:5001 192.168.2.90 admin password", args[0]);
-        std::process::exit(1);
-    }
-
-    let node_name = args[1].clone();
-    let central_addr = args[2].clone();
-    let camera = CameraConfig {
-        host: args[3].clone(),
-        user: args[4].clone(),
-        pass: args[5].clone(),
-    };
+    let cli = Cli::parse();
 
     // Initialize GStreamer
     gstreamer::init()?;
@@ -78,10 +98,10 @@ fn main() -> Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(async_main(node_name, central_addr, camera))
+        .block_on(async_main(cli.name, cli.central, cli.source))
 }
 
-async fn async_main(node_name: String, central_addr: String, camera: CameraConfig) -> Result<()> {
+async fn async_main(node_name: String, central_addr: String, source: Source) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     println!("==========================================");
@@ -113,52 +133,61 @@ async fn async_main(node_name: String, central_addr: String, camera: CameraConfi
     println!("Fingerprint: {}", &fingerprint[..32]);
     println!();
 
-    // Create ONVIF client and test connection
-    let onvif = Arc::new(Mutex::new(OnvifClient::new(&camera.host, &camera.user, &camera.pass)));
+    // Get RTSP URL and optional ONVIF client based on source type
+    let (camera_rtsp_url, onvif, device_info) = match source {
+        Source::Rtsp { url } => {
+            println!("Using direct RTSP source");
+            println!("RTSP URL: {}", url);
+            println!();
+            (url, None, "Direct RTSP".to_string())
+        }
+        Source::Onvif { ip, user, pass } => {
+            let mut client = OnvifClient::new(&ip, &user, &pass);
+            println!("Connecting to ONVIF camera at {}...", ip);
 
-    println!("Connecting to ONVIF camera at {}...", camera.host);
-    let (device_info, camera_rtsp_url) = {
-        let mut client = onvif.lock().unwrap();
-        let info = client.get_device_info()?;
+            let info = client.get_device_info()?;
 
-        // Fetch available profiles
-        let profiles = client.get_profiles()?;
+            // Fetch available profiles
+            let profiles = client.get_profiles()?;
 
-        let selected_profile = if profiles.is_empty() {
-            // No profiles found, use default
-            println!("No profiles found, using default");
-            None
-        } else if profiles.len() == 1 {
-            // Only one profile, use it automatically
-            println!("Using profile: {}", profiles[0]);
-            client.set_profile(&profiles[0].token);
-            Some(profiles[0].token.clone())
-        } else {
-            // Multiple profiles, let user choose
-            println!("\nAvailable profiles:");
-            for (i, profile) in profiles.iter().enumerate() {
-                println!("  [{}] {}", i + 1, profile);
-            }
+            let selected_profile = if profiles.is_empty() {
+                // No profiles found, use default
+                println!("No profiles found, using default");
+                None
+            } else if profiles.len() == 1 {
+                // Only one profile, use it automatically
+                println!("Using profile: {}", profiles[0]);
+                client.set_profile(&profiles[0].token);
+                Some(profiles[0].token.clone())
+            } else {
+                // Multiple profiles, let user choose
+                println!("\nAvailable profiles:");
+                for (i, profile) in profiles.iter().enumerate() {
+                    println!("  [{}] {}", i + 1, profile);
+                }
+                println!();
+
+                let selected = prompt_profile_selection(profiles.len())?;
+                let profile = &profiles[selected];
+                println!("Selected: {}", profile);
+                client.set_profile(&profile.token);
+                Some(profile.token.clone())
+            };
+
+            let url = if let Some(ref token) = selected_profile {
+                client.get_stream_uri_for_profile(token)?
+            } else {
+                client.get_stream_uri()?
+            };
+
+            let info_str = format!("{}", info);
+            println!("Camera: {}", info);
+            println!("Camera RTSP: {}", url);
             println!();
 
-            let selected = prompt_profile_selection(profiles.len())?;
-            let profile = &profiles[selected];
-            println!("Selected: {}", profile);
-            client.set_profile(&profile.token);
-            Some(profile.token.clone())
-        };
-
-        let url = if let Some(ref token) = selected_profile {
-            client.get_stream_uri_for_profile(token)?
-        } else {
-            client.get_stream_uri()?
-        };
-
-        (info, url)
+            (url, Some(Arc::new(Mutex::new(client))), info_str)
+        }
     };
-    println!("Camera: {}", device_info);
-    println!("Camera RTSP: {}", camera_rtsp_url);
-    println!();
 
     // Ask about recording now, but start ffmpeg AFTER RTSP server is attached
     // (spawning ffmpeg before GLib attach seems to cause issues)
@@ -562,7 +591,7 @@ async fn async_main(node_name: String, central_addr: String, camera: CameraConfi
 
 fn handle_command(
     cmd: &str,
-    onvif: &Arc<Mutex<OnvifClient>>,
+    onvif: &Option<Arc<Mutex<OnvifClient>>>,
     pipeline_state: &Arc<Mutex<PipelineState>>,
 ) -> Result<String, String> {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
@@ -657,7 +686,12 @@ fn handle_command(
         }
 
         // PTZ and camera commands need the ONVIF client
-        _ => handle_ptz_command(parts, onvif),
+        _ => {
+            match onvif {
+                Some(client) => handle_ptz_command(parts, client),
+                None => Err("PTZ commands not available for direct RTSP sources".to_string()),
+            }
+        }
     }
 }
 
