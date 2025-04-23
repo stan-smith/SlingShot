@@ -691,8 +691,13 @@ async fn handle_connection(
                                     }
                                 };
 
-                                // Track QoS metrics
-                                qos.record(frame.sequence, data.len());
+                                // Track QoS metrics - returns true if frame is fresh (newest seen)
+                                let is_fresh = qos.record(frame.sequence, data.len());
+
+                                // Skip stale frames (arrived after a newer frame)
+                                if !is_fresh {
+                                    continue;
+                                }
 
                                 // Cache keyframes for late RTSP clients
                                 if frame.is_keyframe {

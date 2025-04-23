@@ -214,18 +214,32 @@ impl Default for SequenceTracker {
 
 /// QoS metrics for video stream monitoring
 ///
-/// Tracks frame delivery statistics including gaps, out-of-order delivery,
-/// drops, and bitrate. Reports can be printed periodically.
+/// Tracks frame delivery statistics including gaps, stale frames (arrived after
+/// a newer frame), jitter, and bitrate. Uses "latest frame wins" semantics -
+/// only frames newer than the highest seen sequence are considered fresh.
 pub struct QosMetrics {
-    last_seq: Option<u32>,
+    /// Highest sequence number seen (never decreases)
+    highest_seq: Option<u32>,
+    /// Total frames received (including stale)
     frames_received: u64,
+    /// Frames intentionally dropped by application
     frames_dropped: u64,
+    /// Sequence gaps (frames we never received)
     gaps: u64,
-    out_of_order: u64,
+    /// Stale frames (arrived after a newer frame was already seen)
+    stale_frames: u64,
     bytes_received: u64,
     start_time: Instant,
     last_report: Instant,
     report_interval: Duration,
+    /// For jitter calculation: last frame arrival time
+    last_arrival: Option<Instant>,
+    /// Jitter tracking: sum of squared deviations from mean interval
+    jitter_sum_sq: f64,
+    /// Jitter tracking: running mean of inter-frame intervals
+    jitter_mean: f64,
+    /// Count of intervals recorded (for jitter calculation)
+    interval_count: u64,
 }
 
 impl QosMetrics {
@@ -233,30 +247,72 @@ impl QosMetrics {
     pub fn new() -> Self {
         let now = Instant::now();
         Self {
-            last_seq: None,
+            highest_seq: None,
             frames_received: 0,
             frames_dropped: 0,
             gaps: 0,
-            out_of_order: 0,
+            stale_frames: 0,
             bytes_received: 0,
             start_time: now,
             last_report: now,
             report_interval: Duration::from_secs(5),
+            last_arrival: None,
+            jitter_sum_sq: 0.0,
+            jitter_mean: 0.0,
+            interval_count: 0,
         }
     }
 
-    /// Record a received frame, tracking sequence gaps
-    pub fn record(&mut self, seq: u32, size: usize) {
-        if let Some(last) = self.last_seq {
-            if seq <= last {
-                self.out_of_order += 1;
-            } else if seq > last + 1 {
-                self.gaps += (seq - last - 1) as u64;
-            }
+    /// Record a received frame, returns true if frame is fresh (should be displayed)
+    ///
+    /// A frame is "fresh" if its sequence number is higher than any previously seen.
+    /// Stale frames (seq <= highest_seen) should be discarded by the caller.
+    pub fn record(&mut self, seq: u32, size: usize) -> bool {
+        let now = Instant::now();
+
+        // Update jitter stats based on inter-frame arrival time
+        if let Some(last) = self.last_arrival {
+            let interval_ms = now.duration_since(last).as_secs_f64() * 1000.0;
+            self.interval_count += 1;
+            // Welford's online algorithm for variance
+            let delta = interval_ms - self.jitter_mean;
+            self.jitter_mean += delta / self.interval_count as f64;
+            let delta2 = interval_ms - self.jitter_mean;
+            self.jitter_sum_sq += delta * delta2;
         }
-        self.last_seq = Some(seq);
+        self.last_arrival = Some(now);
+
         self.frames_received += 1;
         self.bytes_received += size as u64;
+
+        let is_fresh = if let Some(highest) = self.highest_seq {
+            // Handle sequence wrap-around: if seq appears to be "behind" by more than
+            // half the u32 range, it's actually ahead (wrapped)
+            let diff = seq.wrapping_sub(highest);
+            if diff == 0 {
+                // Duplicate frame
+                self.stale_frames += 1;
+                false
+            } else if diff <= 0x80000000 {
+                // seq is ahead of highest (normal case, or wrapped forward)
+                let gap = diff - 1;
+                if gap > 0 {
+                    self.gaps += gap as u64;
+                }
+                self.highest_seq = Some(seq);
+                true
+            } else {
+                // seq is behind highest (stale frame)
+                self.stale_frames += 1;
+                false
+            }
+        } else {
+            // First frame
+            self.highest_seq = Some(seq);
+            true
+        };
+
+        is_fresh
     }
 
     /// Record a dropped frame
@@ -275,6 +331,15 @@ impl QosMetrics {
         }
     }
 
+    /// Calculate jitter (standard deviation of inter-frame intervals) in milliseconds
+    pub fn jitter_ms(&self) -> f64 {
+        if self.interval_count < 2 {
+            0.0
+        } else {
+            (self.jitter_sum_sq / (self.interval_count - 1) as f64).sqrt()
+        }
+    }
+
     /// Format the current metrics as a report string
     pub fn format_report(&self) -> String {
         let elapsed = self.start_time.elapsed().as_secs_f64();
@@ -282,9 +347,10 @@ impl QosMetrics {
         let total = self.frames_received + self.gaps;
         let loss = if total > 0 { (self.gaps as f64 / total as f64) * 100.0 } else { 0.0 };
         let mbps = (self.bytes_received as f64 * 8.0) / (elapsed * 1_000_000.0);
+        let jitter = self.jitter_ms();
         format!(
-            "fps={:.1} loss={:.1}% gaps={} ooo={} dropped={} bitrate={:.2}mbps",
-            fps, loss, self.gaps, self.out_of_order, self.frames_dropped, mbps
+            "fps={:.1} loss={:.1}% gaps={} stale={} dropped={} jitter={:.1}ms bitrate={:.2}mbps",
+            fps, loss, self.gaps, self.stale_frames, self.frames_dropped, jitter, mbps
         )
     }
 
@@ -292,8 +358,8 @@ impl QosMetrics {
     pub fn frames_received(&self) -> u64 { self.frames_received }
     /// Get gaps count
     pub fn gaps(&self) -> u64 { self.gaps }
-    /// Get out-of-order count
-    pub fn out_of_order(&self) -> u64 { self.out_of_order }
+    /// Get stale frames count (arrived after a newer frame)
+    pub fn stale_frames(&self) -> u64 { self.stale_frames }
     /// Get dropped frames count
     pub fn frames_dropped(&self) -> u64 { self.frames_dropped }
     /// Get bytes received
@@ -379,5 +445,85 @@ mod tests {
         assert_eq!(gap, Some(2));
 
         assert_eq!(tracker.gaps_detected(), 1);
+    }
+
+    #[test]
+    fn test_qos_metrics_fresh_frames() {
+        let mut qos = QosMetrics::new();
+
+        // First frame is always fresh
+        assert!(qos.record(0, 100));
+        assert_eq!(qos.frames_received(), 1);
+        assert_eq!(qos.stale_frames(), 0);
+
+        // Sequential frames are fresh
+        assert!(qos.record(1, 100));
+        assert!(qos.record(2, 100));
+        assert_eq!(qos.frames_received(), 3);
+        assert_eq!(qos.stale_frames(), 0);
+        assert_eq!(qos.gaps(), 0);
+    }
+
+    #[test]
+    fn test_qos_metrics_stale_frames() {
+        let mut qos = QosMetrics::new();
+
+        // Receive frames 0, 1, 2
+        assert!(qos.record(0, 100));
+        assert!(qos.record(1, 100));
+        assert!(qos.record(2, 100));
+
+        // Frame 1 arrives late - should be stale
+        assert!(!qos.record(1, 100));
+        assert_eq!(qos.stale_frames(), 1);
+
+        // Frame 0 arrives very late - also stale
+        assert!(!qos.record(0, 100));
+        assert_eq!(qos.stale_frames(), 2);
+
+        // Frame 3 is fresh
+        assert!(qos.record(3, 100));
+        assert_eq!(qos.stale_frames(), 2);
+    }
+
+    #[test]
+    fn test_qos_metrics_gaps() {
+        let mut qos = QosMetrics::new();
+
+        assert!(qos.record(0, 100));
+        // Skip frames 1, 2, 3
+        assert!(qos.record(4, 100));
+        assert_eq!(qos.gaps(), 3);
+
+        // Skip frames 5, 6
+        assert!(qos.record(7, 100));
+        assert_eq!(qos.gaps(), 5);
+    }
+
+    #[test]
+    fn test_qos_metrics_duplicate() {
+        let mut qos = QosMetrics::new();
+
+        assert!(qos.record(5, 100));
+        // Duplicate of same frame
+        assert!(!qos.record(5, 100));
+        assert_eq!(qos.stale_frames(), 1);
+    }
+
+    #[test]
+    fn test_qos_metrics_wrap_around() {
+        let mut qos = QosMetrics::new();
+
+        // Start near wrap point
+        assert!(qos.record(u32::MAX - 1, 100));
+        assert!(qos.record(u32::MAX, 100));
+        // Wrap to 0
+        assert!(qos.record(0, 100));
+        assert_eq!(qos.gaps(), 0);
+        assert_eq!(qos.stale_frames(), 0);
+
+        // Frame 1 is fresh
+        assert!(qos.record(1, 100));
+        assert_eq!(qos.gaps(), 0);
     }
 }

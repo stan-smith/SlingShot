@@ -66,7 +66,8 @@ enum Source {
 struct StreamParams {
     width: i32,
     height: i32,
-    framerate: i32,
+    /// Target framerate (None = passthrough from source)
+    framerate: Option<i32>,
     bitrate: u32,
 }
 
@@ -75,7 +76,7 @@ impl Default for StreamParams {
         Self {
             width: 1024,
             height: 576,
-            framerate: 30,
+            framerate: None,  // Passthrough from source by default
             bitrate: 400,  // Start low, can increase via command
         }
     }
@@ -85,7 +86,10 @@ impl Default for StreamParams {
 struct PipelineState {
     capsfilter: Option<gstreamer::Element>,
     encoder: Option<gstreamer::Element>,
+    videorate: Option<gstreamer::Element>,
     params: StreamParams,
+    /// Detected source framerate (set when pipeline negotiates)
+    source_framerate: Option<i32>,
 }
 
 fn main() -> Result<()> {
@@ -227,7 +231,9 @@ async fn async_main(node_name: String, central_addr: String, source: Source) -> 
     let pipeline_state = Arc::new(Mutex::new(PipelineState {
         capsfilter: None,
         encoder: None,
+        videorate: None,
         params: StreamParams::default(),
+        source_framerate: None,
     }));
 
     // Create channel for video frames (will be sent over QUIC)
@@ -246,8 +252,14 @@ async fn async_main(node_name: String, central_addr: String, source: Source) -> 
     let decode = gstreamer::ElementFactory::make("avdec_h264").build()?;
     let convert = gstreamer::ElementFactory::make("videoconvert").build()?;
     let scale = gstreamer::ElementFactory::make("videoscale").build()?;
-    let rate = gstreamer::ElementFactory::make("videorate").build()?;
+    // Configure videorate to only drop frames, never duplicate (prevents buffering)
+    let rate = gstreamer::ElementFactory::make("videorate")
+        .property("drop-only", true)
+        .property("skip-to-first", true)
+        .build()?;
 
+    // Capsfilter: set resolution only, let framerate pass through from source
+    // User can reduce framerate later but not increase above source
     let capsfilter = gstreamer::ElementFactory::make("capsfilter")
         .name("caps")
         .property(
@@ -255,7 +267,7 @@ async fn async_main(node_name: String, central_addr: String, source: Source) -> 
             gstreamer::Caps::builder("video/x-raw")
                 .field("width", params.width)
                 .field("height", params.height)
-                .field("framerate", gstreamer::Fraction::new(params.framerate, 1))
+                // No framerate field = passthrough from source
                 .build(),
         )
         .build()?;
@@ -330,11 +342,26 @@ async fn async_main(node_name: String, central_addr: String, source: Source) -> 
         }
     });
 
+    // Detect source framerate using ffprobe (more reliable than GStreamer caps)
+    {
+        let mut state = pipeline_state.lock().unwrap();
+        match detect_source_framerate(&camera_rtsp_url) {
+            Ok(fps) => {
+                println!("Detected source framerate: {} fps", fps);
+                state.source_framerate = Some(fps);
+            }
+            Err(e) => {
+                eprintln!("Warning: Could not detect source framerate: {}", e);
+            }
+        }
+    }
+
     // Store element references for dynamic control
     {
         let mut state = pipeline_state.lock().unwrap();
         state.capsfilter = Some(capsfilter.clone());
         state.encoder = Some(encoder.clone());
+        state.videorate = Some(rate.clone());
     }
 
     // Set up appsink callback to send frames to channel
@@ -613,12 +640,14 @@ fn handle_command(
             state.params.height = height;
 
             if let Some(ref caps) = state.capsfilter {
-                let new_caps = gstreamer::Caps::builder("video/x-raw")
+                // Build caps with optional framerate (only if user has set one)
+                let mut builder = gstreamer::Caps::builder("video/x-raw")
                     .field("width", width)
-                    .field("height", height)
-                    .field("framerate", gstreamer::Fraction::new(state.params.framerate, 1))
-                    .build();
-                caps.set_property("caps", &new_caps);
+                    .field("height", height);
+                if let Some(fps) = state.params.framerate {
+                    builder = builder.field("framerate", gstreamer::Fraction::new(fps, 1));
+                }
+                caps.set_property("caps", &builder.build());
                 Ok(format!("Resolution changed to {}x{}", width, height))
             } else {
                 Err("Pipeline not ready (no clients connected?)".to_string())
@@ -653,35 +682,44 @@ fn handle_command(
             }
             let fps: i32 = parts[1].parse().map_err(|_| "Invalid framerate")?;
 
-            // Limit to 60 fps max
-            if fps > 60 {
-                return Err("Maximum framerate is 60 fps".to_string());
-            }
             if fps < 1 {
                 return Err("Minimum framerate is 1 fps".to_string());
             }
 
             let mut state = pipeline_state.lock().unwrap();
-            state.params.framerate = fps;
 
-            if let Some(ref caps) = state.capsfilter {
-                let new_caps = gstreamer::Caps::builder("video/x-raw")
-                    .field("width", state.params.width)
-                    .field("height", state.params.height)
-                    .field("framerate", gstreamer::Fraction::new(fps, 1))
-                    .build();
-                caps.set_property("caps", &new_caps);
-                Ok(format!("Framerate changed to {} fps", fps))
+            // Cannot increase above source framerate (videorate can only drop, not duplicate)
+            if let Some(source_fps) = state.source_framerate {
+                if fps > source_fps {
+                    return Err(format!(
+                        "Cannot exceed source framerate of {} fps (can only reduce)",
+                        source_fps
+                    ));
+                }
+            }
+
+            state.params.framerate = Some(fps);
+
+            // Use videorate's max-rate property instead of capsfilter
+            // This is the intended way to limit framerate with drop-only mode
+            if let Some(ref rate) = state.videorate {
+                rate.set_property("max-rate", fps);
+                Ok(format!("Framerate limited to {} fps", fps))
             } else {
-                Err("Pipeline not ready (no clients connected?)".to_string())
+                Err("Pipeline not ready".to_string())
             }
         }
 
         "params" | "stream" => {
             let state = pipeline_state.lock().unwrap();
+            let fps_str = match (state.params.framerate, state.source_framerate) {
+                (Some(fps), _) => format!("{}", fps),
+                (None, Some(source)) => format!("{} (source)", source),
+                (None, None) => "passthrough".to_string(),
+            };
             Ok(format!(
                 "Stream: {}x{} @ {} fps, {} kbps",
-                state.params.width, state.params.height, state.params.framerate, state.params.bitrate
+                state.params.width, state.params.height, fps_str, state.params.bitrate
             ))
         }
 
@@ -956,5 +994,44 @@ fn prompt_number(prompt: &str, default: u8) -> Result<u8> {
         }
         println!("Please enter a number between 0 and 100");
     }
+}
+
+/// Detect source framerate using ffprobe
+fn detect_source_framerate(rtsp_url: &str) -> Result<i32> {
+    use std::process::Command;
+
+    let output = Command::new("ffprobe")
+        .args([
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=r_frame_rate",
+            "-of", "csv=p=0",
+            "-rtsp_transport", "tcp",
+            "-i", rtsp_url,
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        anyhow::bail!("ffprobe failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    let fps_str = String::from_utf8_lossy(&output.stdout);
+    let fps_str = fps_str.trim();
+
+    // Parse fraction like "25/1" or "30000/1001"
+    if let Some((num, denom)) = fps_str.split_once('/') {
+        let num: f64 = num.parse().unwrap_or(0.0);
+        let denom: f64 = denom.parse().unwrap_or(1.0);
+        if denom > 0.0 {
+            return Ok((num / denom).round() as i32);
+        }
+    }
+
+    // Try parsing as plain number
+    if let Ok(fps) = fps_str.parse::<f64>() {
+        return Ok(fps.round() as i32);
+    }
+
+    anyhow::bail!("Could not parse framerate: {}", fps_str)
 }
 
