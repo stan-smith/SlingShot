@@ -37,7 +37,8 @@ struct PtzPosition {
 struct StreamParams {
     width: i32,
     height: i32,
-    framerate: i32,
+    /// Target framerate (None = use source default)
+    framerate: Option<i32>,
     bitrate: u32,
 }
 
@@ -46,11 +47,14 @@ impl Default for StreamParams {
         Self {
             width: 1920,
             height: 1080,
-            framerate: 30,
+            framerate: None,  // Use source default (30fps for test pattern)
             bitrate: 4000,
         }
     }
 }
+
+/// Source framerate for test pattern (fixed)
+const SOURCE_FRAMERATE: i32 = 30;
 
 /// Shared state for the test camera
 #[derive(Default)]
@@ -61,6 +65,7 @@ struct TestCameraState {
     // Pipeline elements for dynamic control
     capsfilter: Option<gstreamer::Element>,
     encoder: Option<gstreamer::Element>,
+    videorate: Option<gstreamer::Element>,
     params: StreamParams,
 }
 
@@ -121,8 +126,8 @@ async fn async_main(
     // Shared camera state
     let camera_state = Arc::new(Mutex::new(TestCameraState::default()));
 
-    // Channel for video frames
-    let (frame_tx, mut frame_rx) = mpsc::channel::<quic_video::VideoFrame>(60);
+    // Channel for video frames (matches real remote)
+    let (frame_tx, mut frame_rx) = mpsc::channel::<quic_video::VideoFrame>(30);
     let seq = Arc::new(AtomicU32::new(0));
 
     // Build GStreamer pipeline: videotestsrc -> encode -> appsink
@@ -140,13 +145,18 @@ async fn async_main(
         .build()?;
     let convert = gstreamer::ElementFactory::make("videoconvert").build()?;
     let scale = gstreamer::ElementFactory::make("videoscale").build()?;
-    let rate = gstreamer::ElementFactory::make("videorate").build()?;
+    // Configure videorate to only drop frames, never duplicate (prevents buffering)
+    let rate = gstreamer::ElementFactory::make("videorate")
+        .property("drop-only", true)
+        .property("skip-to-first", true)
+        .build()?;
 
+    // Capsfilter: set resolution only, framerate controlled via videorate max-rate
     let capsfilter = gstreamer::ElementFactory::make("capsfilter")
         .name("caps")
         .property("caps", gstreamer::Caps::builder("video/x-raw")
             .field("width", params.width).field("height", params.height)
-            .field("framerate", gstreamer::Fraction::new(params.framerate, 1)).build())
+            .build())
         .build()?;
 
     let encoder = gstreamer::ElementFactory::make("x264enc")
@@ -159,9 +169,10 @@ async fn async_main(
 
     let parser = gstreamer::ElementFactory::make("h264parse").build()?;
     let sink = gstreamer::ElementFactory::make("appsink").build()?.dynamic_cast::<AppSink>().unwrap();
+    // Configure appsink - for test pattern we can drop frames if needed
     sink.set_sync(false);
-    sink.set_max_buffers(1);
-    sink.set_drop(true);
+    sink.set_max_buffers(30);  // ~1 second buffer at 30fps
+    sink.set_drop(false);      // Match real remote behavior
     sink.set_caps(Some(&gstreamer::Caps::builder("video/x-h264")
         .field("stream-format", "byte-stream").field("alignment", "au").build()));
 
@@ -173,6 +184,7 @@ async fn async_main(
         let mut state = camera_state.lock().unwrap();
         state.capsfilter = Some(capsfilter.clone());
         state.encoder = Some(encoder.clone());
+        state.videorate = Some(rate.clone());
     }
 
     // Set up appsink callback
@@ -510,15 +522,15 @@ fn handle_command(cmd: &str, state: &Arc<Mutex<TestCameraState>>) -> Result<Stri
             camera.params.height = height;
 
             if let Some(ref caps) = camera.capsfilter {
+                // Resolution only, framerate controlled via videorate
                 let new_caps = gstreamer::Caps::builder("video/x-raw")
                     .field("width", width)
                     .field("height", height)
-                    .field("framerate", gstreamer::Fraction::new(camera.params.framerate, 1))
                     .build();
                 caps.set_property("caps", &new_caps);
                 Ok(format!("Resolution changed to {}x{}", width, height))
             } else {
-                Err("Pipeline not ready (no clients connected?)".to_string())
+                Err("Pipeline not ready".to_string())
             }
         }
 
@@ -544,26 +556,38 @@ fn handle_command(cmd: &str, state: &Arc<Mutex<TestCameraState>>) -> Result<Stri
             }
             let fps: i32 = parts[1].parse().map_err(|_| "Invalid framerate")?;
 
-            camera.params.framerate = fps;
+            if fps < 1 {
+                return Err("Minimum framerate is 1 fps".to_string());
+            }
 
-            if let Some(ref caps) = camera.capsfilter {
-                let new_caps = gstreamer::Caps::builder("video/x-raw")
-                    .field("width", camera.params.width)
-                    .field("height", camera.params.height)
-                    .field("framerate", gstreamer::Fraction::new(fps, 1))
-                    .build();
-                caps.set_property("caps", &new_caps);
-                Ok(format!("Framerate changed to {} fps", fps))
+            // Cannot increase above source framerate
+            if fps > SOURCE_FRAMERATE {
+                return Err(format!(
+                    "Cannot exceed source framerate of {} fps (can only reduce)",
+                    SOURCE_FRAMERATE
+                ));
+            }
+
+            camera.params.framerate = Some(fps);
+
+            // Use videorate's max-rate property instead of capsfilter
+            if let Some(ref rate) = camera.videorate {
+                rate.set_property("max-rate", fps);
+                Ok(format!("Framerate limited to {} fps", fps))
             } else {
-                Err("Pipeline not ready (no clients connected?)".to_string())
+                Err("Pipeline not ready".to_string())
             }
         }
 
         "params" | "stream" => {
+            let fps_str = match camera.params.framerate {
+                Some(fps) => format!("{}", fps),
+                None => format!("{} (source)", SOURCE_FRAMERATE),
+            };
             Ok(format!(
                 "Stream: {}x{} @ {} fps, {} kbps",
                 camera.params.width, camera.params.height,
-                camera.params.framerate, camera.params.bitrate
+                fps_str, camera.params.bitrate
             ))
         }
 
