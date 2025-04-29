@@ -1,0 +1,28 @@
+[package]
+name = "remote-setup"
+version = "0.1.0"
+edition = "2021"
+description = "Interactive setup and installation tool for kaiju remote nodes"
+
+[[bin]]
+name = "kaiju-remote-setup"
+path = "src/main.rs"
+
+[dependencies]
+# Configuration management
+config-manager = { path = "../config-manager" }
+
+# ONVIF client for camera discovery
+onvif-client = { path = "../onvif-client" }
+
+# CLI parsing
+clap = { version = "4", features = ["derive"] }
+
+# Interactive prompts
+dialoguer = "0.11"
+
+# Error handling
+anyhow = "1"
+
+# User/group info
+users = "0.11"

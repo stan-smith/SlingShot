@@ -2,6 +2,9 @@ mod storage;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use config_manager::{
+    OnvifConfig, RemoteConfig, RtspConfig, SourceConfig, StorageConfig as CfgStorageConfig,
+};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use ffmpeg_recorder::{ensure_disk_space, Recorder, RecorderConfig};
 use gstreamer::prelude::*;
@@ -27,19 +30,23 @@ use tokio::sync::mpsc;
 #[command(name = "remote")]
 #[command(about = "Kaiju remote edge node - streams video to central node")]
 struct Cli {
-    /// Node name for identification
+    /// Node name for identification (required on first run, optional after)
     #[arg(short, long)]
-    name: String,
+    name: Option<String>,
 
-    /// Central node address (ip:port)
+    /// Central node address (ip:port) (required on first run, optional after)
     #[arg(short, long)]
-    central: String,
+    central: Option<String>,
+
+    /// Don't save configuration to disk
+    #[arg(long)]
+    no_save: bool,
 
     #[command(subcommand)]
-    source: Source,
+    source: Option<Source>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum Source {
     /// Connect to RTSP stream directly
     Rtsp {
@@ -98,28 +105,88 @@ fn main() -> Result<()> {
     // Initialize GStreamer
     gstreamer::init()?;
 
+    // Load or build configuration
+    let (config, save_config) = load_or_build_config(&cli)?;
+
     // Run async runtime
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(async_main(cli.name, cli.central, cli.source))
+        .block_on(async_main(config, save_config && !cli.no_save))
 }
 
-async fn async_main(node_name: String, central_addr: String, source: Source) -> Result<()> {
+/// Load existing config or build from CLI args
+fn load_or_build_config(cli: &Cli) -> Result<(RemoteConfig, bool)> {
+    if RemoteConfig::exists() {
+        // Load existing config
+        let config_path = RemoteConfig::default_path()?;
+        println!("Loading configuration from {}", config_path.display());
+        let mut config = RemoteConfig::load()?;
+
+        // CLI args override config values
+        if let Some(ref name) = cli.name {
+            config.node_name = name.clone();
+        }
+        if let Some(ref central) = cli.central {
+            config.central_address = central.clone();
+        }
+        if let Some(ref source) = cli.source {
+            config.source = cli_source_to_config(source);
+        }
+
+        Ok((config, false)) // Don't save - already have config
+    } else {
+        // First run - require CLI args
+        let name = cli.name.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("First run requires --name argument")
+        })?;
+        let central = cli.central.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("First run requires --central argument")
+        })?;
+        let source = cli.source.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("First run requires source subcommand (rtsp or onvif)")
+        })?;
+
+        let config = RemoteConfig {
+            node_name: name.clone(),
+            central_address: central.clone(),
+            source: cli_source_to_config(source),
+            recording: config_manager::RecordingConfig::default(),
+            storage: CfgStorageConfig::default(),
+        };
+
+        Ok((config, true)) // Will save after prompts
+    }
+}
+
+/// Convert CLI Source to config SourceConfig
+fn cli_source_to_config(source: &Source) -> SourceConfig {
+    match source {
+        Source::Rtsp { url } => SourceConfig::Rtsp(RtspConfig::new(url)),
+        Source::Onvif { ip, user, pass } => {
+            SourceConfig::Onvif(OnvifConfig::new(ip.clone(), user.clone(), pass))
+        }
+    }
+}
+
+async fn async_main(mut config: RemoteConfig, save_config: bool) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     println!("==========================================");
-    println!("RTSP REMOTE NODE: {}", node_name);
+    println!("RTSP REMOTE NODE: {}", config.node_name);
     println!("==========================================");
     println!();
 
-    // Setup storage for recordings
-    let storage = storage::Storage::new();
+    // Setup storage for recordings using config
+    let storage = storage::Storage::with_paths_from_config(&config.storage);
     if !storage.is_available() {
         println!("Storage not configured or not available.");
         match storage.setup_interactive() {
-            Ok(true) => println!("Storage ready.\n"),
-            Ok(false) => println!("Storage setup skipped.\n"),
+            Ok(Some(new_storage_config)) => {
+                println!("Storage ready.\n");
+                config.storage = new_storage_config;
+            }
+            Ok(None) => println!("Storage setup skipped.\n"),
             Err(e) => println!("Storage setup failed: {}\nContinuing without storage.\n", e),
         }
     } else {
@@ -138,44 +205,52 @@ async fn async_main(node_name: String, central_addr: String, source: Source) -> 
     println!();
 
     // Get RTSP URL and optional ONVIF client based on source type
-    let (camera_rtsp_url, onvif, device_info) = match source {
-        Source::Rtsp { url } => {
+    let (camera_rtsp_url, onvif, device_info) = match &config.source {
+        SourceConfig::Rtsp(rtsp_cfg) => {
+            let url = rtsp_cfg.url().map_err(|e| anyhow::anyhow!("Failed to decode RTSP URL: {}", e))?;
             println!("Using direct RTSP source");
             println!("RTSP URL: {}", url);
             println!();
             (url, None, "Direct RTSP".to_string())
         }
-        Source::Onvif { ip, user, pass } => {
-            let mut client = OnvifClient::new(&ip, &user, &pass);
-            println!("Connecting to ONVIF camera at {}...", ip);
+        SourceConfig::Onvif(onvif_cfg) => {
+            let pass = onvif_cfg.password().map_err(|e| anyhow::anyhow!("Failed to decode password: {}", e))?;
+            let mut client = OnvifClient::new(&onvif_cfg.ip, &onvif_cfg.username, &pass);
+            println!("Connecting to ONVIF camera at {}...", onvif_cfg.ip);
 
             let info = client.get_device_info()?;
 
-            // Fetch available profiles
-            let profiles = client.get_profiles()?;
-
-            let selected_profile = if profiles.is_empty() {
-                // No profiles found, use default
-                println!("No profiles found, using default");
-                None
-            } else if profiles.len() == 1 {
-                // Only one profile, use it automatically
-                println!("Using profile: {}", profiles[0]);
-                client.set_profile(&profiles[0].token);
-                Some(profiles[0].token.clone())
+            // Use stored profile token if available, otherwise prompt
+            let selected_profile = if let Some(ref token) = onvif_cfg.profile_token {
+                // Profile was configured via setup tool
+                println!("Using configured profile: {}", token);
+                client.set_profile(token);
+                Some(token.clone())
             } else {
-                // Multiple profiles, let user choose
-                println!("\nAvailable profiles:");
-                for (i, profile) in profiles.iter().enumerate() {
-                    println!("  [{}] {}", i + 1, profile);
-                }
-                println!();
+                // No stored profile - enumerate and prompt
+                let profiles = client.get_profiles()?;
 
-                let selected = prompt_profile_selection(profiles.len())?;
-                let profile = &profiles[selected];
-                println!("Selected: {}", profile);
-                client.set_profile(&profile.token);
-                Some(profile.token.clone())
+                if profiles.is_empty() {
+                    println!("No profiles found, using default");
+                    None
+                } else if profiles.len() == 1 {
+                    println!("Using profile: {}", profiles[0]);
+                    client.set_profile(&profiles[0].token);
+                    Some(profiles[0].token.clone())
+                } else {
+                    // Multiple profiles, let user choose
+                    println!("\nAvailable profiles:");
+                    for (i, profile) in profiles.iter().enumerate() {
+                        println!("  [{}] {}", i + 1, profile);
+                    }
+                    println!();
+
+                    let selected = prompt_profile_selection(profiles.len())?;
+                    let profile = &profiles[selected];
+                    println!("Selected: {}", profile);
+                    client.set_profile(&profile.token);
+                    Some(profile.token.clone())
+                }
             };
 
             let url = if let Some(ref token) = selected_profile {
@@ -193,32 +268,55 @@ async fn async_main(node_name: String, central_addr: String, source: Source) -> 
         }
     };
 
-    // Ask about recording now, but start ffmpeg AFTER RTSP server is attached
-    // (spawning ffmpeg before GLib attach seems to cause issues)
-    let recording_config: Option<RecorderConfig> = if prompt_yes_no("Enable local recording?")? {
-        let storage = storage::Storage::new();
-        if !storage.is_available() {
-            println!("Storage not available. Setting up...");
-            match storage.setup_interactive() {
-                Ok(true) => println!("Storage ready."),
-                Ok(false) => {
-                    println!("Storage setup skipped. Recording disabled.");
-                }
-                Err(e) => {
-                    println!("Storage setup failed: {}. Recording disabled.", e);
-                }
-            }
-        }
-
+    // Ask about recording if not already configured
+    let recording_config: Option<RecorderConfig> = if config.recording.enabled {
+        // Recording already enabled in config
         if let Some(output_dir) = storage.recordings_path() {
-            let reserve_pct = prompt_number("Disk reserve % (stop when disk is X% full)", 90)?;
             Some(RecorderConfig {
                 rtsp_url: camera_rtsp_url.clone(),
                 output_dir,
                 segment_duration: 30,
-                disk_reserve_percent: reserve_pct,
+                disk_reserve_percent: config.recording.disk_reserve_percent,
                 file_format: "mp4".to_string(),
             })
+        } else {
+            println!("Recording enabled but storage not available.");
+            None
+        }
+    } else if save_config {
+        // First run - prompt for recording settings
+        if prompt_yes_no("Enable local recording?")? {
+            let storage = storage::Storage::with_paths_from_config(&config.storage);
+            if !storage.is_available() {
+                println!("Storage not available. Setting up...");
+                match storage.setup_interactive() {
+                    Ok(Some(new_storage_config)) => {
+                        println!("Storage ready.");
+                        config.storage = new_storage_config;
+                    }
+                    Ok(None) => {
+                        println!("Storage setup skipped. Recording disabled.");
+                    }
+                    Err(e) => {
+                        println!("Storage setup failed: {}. Recording disabled.", e);
+                    }
+                }
+            }
+
+            if let Some(output_dir) = storage.recordings_path() {
+                let reserve_pct = prompt_number("Disk reserve % (stop when disk is X% full)", 90)?;
+                config.recording.enabled = true;
+                config.recording.disk_reserve_percent = reserve_pct;
+                Some(RecorderConfig {
+                    rtsp_url: camera_rtsp_url.clone(),
+                    output_dir,
+                    segment_duration: 30,
+                    disk_reserve_percent: reserve_pct,
+                    file_format: "mp4".to_string(),
+                })
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -226,6 +324,20 @@ async fn async_main(node_name: String, central_addr: String, source: Source) -> 
         None
     };
     println!();
+
+    // Save config if this is first run
+    if save_config {
+        match config.save() {
+            Ok(()) => {
+                let path = RemoteConfig::default_path().unwrap_or_default();
+                println!("Configuration saved to {}", path.display());
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to save configuration: {}", e);
+            }
+        }
+        println!();
+    }
 
     // Create shared pipeline state for dynamic control
     let pipeline_state = Arc::new(Mutex::new(PipelineState {
@@ -418,14 +530,14 @@ async fn async_main(node_name: String, central_addr: String, source: Source) -> 
     println!();
 
     // Connect to central node
-    println!("Connecting to central node at {}...", central_addr);
+    println!("Connecting to central node at {}...", config.central_address);
 
     let client_config = quic_common::create_client_config()?;
 
     let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
     let endpoint = Endpoint::client(bind_addr)?;
 
-    let remote_addr: SocketAddr = central_addr.parse()?;
+    let remote_addr: SocketAddr = config.central_address.parse()?;
     let connection = endpoint
         .connect_with(client_config, remote_addr, "localhost")?
         .await?;
@@ -435,7 +547,7 @@ async fn async_main(node_name: String, central_addr: String, source: Source) -> 
     // Send authentication request: AUTH|name|fingerprint|VIDEO
     // The "VIDEO" marker indicates this node will stream video over QUIC (not RTSP)
     let mut send_stream = connection.open_uni().await?;
-    let auth_request = format!("AUTH|{}|{}|VIDEO", node_name, fingerprint);
+    let auth_request = format!("AUTH|{}|{}|VIDEO", config.node_name, fingerprint);
     send_stream.write_all(auth_request.as_bytes()).await?;
     send_stream.finish()?;
 
@@ -451,7 +563,7 @@ async fn async_main(node_name: String, central_addr: String, source: Source) -> 
 
         // Send confirmation
         let mut confirm_stream = connection.open_uni().await?;
-        let confirmation = format!("CONFIRM|{}|Ready - Camera: {}", node_name, device_info);
+        let confirmation = format!("CONFIRM|{}|Ready - Camera: {}", config.node_name, device_info);
         confirm_stream.write_all(confirmation.as_bytes()).await?;
         confirm_stream.finish()?;
 
@@ -467,7 +579,7 @@ async fn async_main(node_name: String, central_addr: String, source: Source) -> 
         println!();
 
         // Spawn video sender task - one QUIC stream per frame
-        let node_name_clone = node_name.clone();
+        let node_name_clone = config.node_name.clone();
         let conn_clone = connection.clone();
         let video_handle = tokio::spawn(async move {
             let mut frame_rx = frame_rx;
@@ -575,7 +687,7 @@ async fn async_main(node_name: String, central_addr: String, source: Source) -> 
                 }
                 _ = health_check_interval.tick() => {
                     // Log QUIC connection stats
-                    quic_metrics::log_stats(&connection, &node_name);
+                    quic_metrics::log_stats(&connection, &config.node_name);
 
                     // Check recorder health
                     if let Some(ref mut rec) = recorder {

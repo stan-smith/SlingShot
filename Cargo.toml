@@ -11,4 +11,6 @@ members = [
     "admin-web",
     "ffmpeg-recorder",
     "recording-retrieval",
+    "config-manager",
+    "remote-setup",
 ]

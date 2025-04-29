@@ -44,3 +44,6 @@ quic-video = { path = "../quic-video" }
 
 # Recording retrieval
 recording-retrieval = { path = "../recording-retrieval" }
+
+# Configuration management
+config-manager = { path = "../config-manager" }

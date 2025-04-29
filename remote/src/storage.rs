@@ -1,13 +1,13 @@
 #![allow(dead_code)]
 
+use config_manager::StorageConfig as CfgStorageConfig;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const STORAGE_CONFIG_PATH: &str = "/etc/rtsp-remote/storage.toml";
 const DEFAULT_MOUNTPOINT: &str = "/media/recordings";
 
 #[derive(Debug)]
-pub struct StorageConfig {
+pub struct StorageStatus {
     pub device: String,
     pub mountpoint: PathBuf,
     pub uuid: Option<String>,
@@ -15,28 +15,48 @@ pub struct StorageConfig {
 }
 
 pub struct Storage {
-    config_path: PathBuf,
     mountpoint: PathBuf,
+    device: Option<String>,
+    uuid: Option<String>,
 }
 
 impl Storage {
     pub fn new() -> Self {
         Self {
-            config_path: PathBuf::from(STORAGE_CONFIG_PATH),
             mountpoint: PathBuf::from(DEFAULT_MOUNTPOINT),
+            device: None,
+            uuid: None,
         }
     }
 
-    pub fn with_paths(config_path: &Path, mountpoint: &Path) -> Self {
+    /// Create storage from config-manager StorageConfig
+    pub fn with_paths_from_config(config: &CfgStorageConfig) -> Self {
         Self {
-            config_path: config_path.to_path_buf(),
+            mountpoint: config.mountpoint.clone(),
+            device: if config.device.is_empty() {
+                None
+            } else {
+                Some(config.device.clone())
+            },
+            uuid: if config.uuid.is_empty() {
+                None
+            } else {
+                Some(config.uuid.clone())
+            },
+        }
+    }
+
+    pub fn with_paths(_config_path: &Path, mountpoint: &Path) -> Self {
+        Self {
             mountpoint: mountpoint.to_path_buf(),
+            device: None,
+            uuid: None,
         }
     }
 
     /// Check if storage is already configured
     pub fn is_configured(&self) -> bool {
-        self.config_path.exists()
+        self.device.is_some()
     }
 
     /// Check if storage is currently mounted and available
@@ -69,144 +89,69 @@ impl Storage {
     }
 
     /// Run interactive storage setup (select device, format, mount)
-    /// Returns Ok(true) if setup completed, Ok(false) if skipped
-    pub fn setup_interactive(&self) -> Result<bool, String> {
+    /// Returns Ok(Some(config)) if setup completed with new config, Ok(None) if skipped
+    pub fn setup_interactive(&self) -> Result<Option<CfgStorageConfig>, String> {
         println!("\n========================================");
         println!("STORAGE SETUP");
         println!("========================================\n");
 
         if self.is_configured() && self.is_available() {
-            println!("Storage already configured and available at {}", self.mountpoint.display());
-            return Ok(true);
+            println!(
+                "Storage already configured and available at {}",
+                self.mountpoint.display()
+            );
+            return Ok(Some(CfgStorageConfig::new(
+                self.device.clone().unwrap_or_default(),
+                self.uuid.clone().unwrap_or_default(),
+                self.mountpoint.clone(),
+            )));
         }
 
-        // Ensure config directory exists
-        if let Some(parent) = self.config_path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create config directory: {}", e))?;
-            }
+        // For now, just check if the mountpoint is available
+        // The storage-selector/storage-mount tools are archived
+        if self.mountpoint.exists() && self.is_available() {
+            println!("Storage available at {}", self.mountpoint.display());
+            return Ok(Some(CfgStorageConfig::new(
+                String::new(),
+                String::new(),
+                self.mountpoint.clone(),
+            )));
         }
 
-        // Step 1: Run storage-selector
-        println!("Select a storage device for recordings...\n");
-
-        let selector_result = Command::new("storage-selector")
-            .arg("-o")
-            .arg(&self.config_path)
-            .status();
-
-        match selector_result {
-            Ok(status) if status.success() => {
-                println!("\nDevice selected.");
-            }
-            Ok(status) => {
-                return Err(format!("Storage selection failed with exit code: {:?}", status.code()));
-            }
-            Err(e) => {
-                return Err(format!("Failed to run storage-selector: {}. Is it installed?", e));
-            }
-        }
-
-        // Step 2: Run storage-mount setup
-        println!("\nSetting up storage mount...\n");
-
-        let mount_result = Command::new("storage-mount")
-            .arg("-c")
-            .arg(&self.config_path)
-            .arg("-m")
-            .arg(&self.mountpoint)
-            .arg("setup")
-            .status();
-
-        match mount_result {
-            Ok(status) if status.success() => {
-                println!("\nStorage setup complete!");
-                println!("Recordings will be saved to: {}", self.mountpoint.display());
-                Ok(true)
-            }
-            Ok(status) => {
-                Err(format!("Storage mount failed with exit code: {:?}", status.code()))
-            }
-            Err(e) => {
-                Err(format!("Failed to run storage-mount: {}. Is it installed?", e))
-            }
-        }
+        println!("Storage setup requires manual configuration.");
+        println!("Please ensure {} is mounted and try again.", self.mountpoint.display());
+        Ok(None)
     }
 
     /// Run non-interactive setup (for automation)
-    pub fn setup_auto(&self) -> Result<bool, String> {
+    pub fn setup_auto(&self) -> Result<Option<CfgStorageConfig>, String> {
         if self.is_configured() && self.is_available() {
-            return Ok(true);
+            return Ok(Some(CfgStorageConfig::new(
+                self.device.clone().unwrap_or_default(),
+                self.uuid.clone().unwrap_or_default(),
+                self.mountpoint.clone(),
+            )));
         }
 
-        // Ensure config directory exists
-        if let Some(parent) = self.config_path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create config directory: {}", e))?;
-            }
+        if self.mountpoint.exists() && self.is_available() {
+            return Ok(Some(CfgStorageConfig::new(
+                String::new(),
+                String::new(),
+                self.mountpoint.clone(),
+            )));
         }
 
-        // Auto-select first unmounted disk
-        let selector_result = Command::new("storage-selector")
-            .arg("--non-interactive")
-            .arg("--yes")
-            .arg("-o")
-            .arg(&self.config_path)
-            .status();
-
-        if !selector_result.map(|s| s.success()).unwrap_or(false) {
-            return Err("Failed to auto-select storage device".to_string());
-        }
-
-        // Auto-mount with --yes to skip prompts
-        let mount_result = Command::new("storage-mount")
-            .arg("-c")
-            .arg(&self.config_path)
-            .arg("-m")
-            .arg(&self.mountpoint)
-            .arg("--yes")
-            .arg("setup")
-            .status();
-
-        match mount_result {
-            Ok(status) if status.success() => Ok(true),
-            _ => Err("Failed to setup storage mount".to_string()),
-        }
+        Err("Storage not available".to_string())
     }
 
     /// Get current storage status
-    pub fn status(&self) -> StorageConfig {
-        let device = self.read_device_from_config().unwrap_or_default();
-        let uuid = self.read_uuid_from_config();
-
-        StorageConfig {
-            device,
+    pub fn status(&self) -> StorageStatus {
+        StorageStatus {
+            device: self.device.clone().unwrap_or_default(),
             mountpoint: self.mountpoint.clone(),
-            uuid,
+            uuid: self.uuid.clone(),
             available: self.is_available(),
         }
-    }
-
-    fn read_device_from_config(&self) -> Option<String> {
-        let content = std::fs::read_to_string(&self.config_path).ok()?;
-        for line in content.lines() {
-            if line.starts_with("device = ") {
-                return Some(line.trim_start_matches("device = ").trim_matches('"').to_string());
-            }
-        }
-        None
-    }
-
-    fn read_uuid_from_config(&self) -> Option<String> {
-        let content = std::fs::read_to_string(&self.config_path).ok()?;
-        for line in content.lines() {
-            if line.starts_with("uuid = ") {
-                return Some(line.trim_start_matches("uuid = ").trim_matches('"').to_string());
-            }
-        }
-        None
     }
 }
 
@@ -220,10 +165,20 @@ impl Default for Storage {
 pub fn print_status(storage: &Storage) {
     let status = storage.status();
     println!("Storage Status:");
-    println!("  Device:     {}", if status.device.is_empty() { "not configured" } else { &status.device });
+    println!(
+        "  Device:     {}",
+        if status.device.is_empty() {
+            "not configured"
+        } else {
+            &status.device
+        }
+    );
     println!("  Mountpoint: {}", status.mountpoint.display());
-    println!("  Available:  {}", if status.available { "yes" } else { "no" });
-    if let Some(uuid) = &status.uuid {
+    println!(
+        "  Available:  {}",
+        if status.available { "yes" } else { "no" }
+    );
+    if let Some(ref uuid) = status.uuid {
         println!("  UUID:       {}", uuid);
     }
 }
