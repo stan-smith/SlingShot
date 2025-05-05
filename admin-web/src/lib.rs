@@ -101,15 +101,14 @@ pub async fn request_approval(
     rx.await.unwrap_or(false)
 }
 
-/// Start the admin web server
-pub async fn run_admin_server(port: u16, state: Arc<AdminState>) -> Result<()> {
+/// Start the admin web server on the specified address
+pub async fn run_admin_server(addr: &str, state: Arc<AdminState>) -> Result<()> {
     let app = Router::new()
         .route("/", get(index_handler))
         .route("/ws", get(ws_handler))
         .with_state(state);
 
-    let addr = format!("0.0.0.0:{}", port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("Admin web server listening on http://{}", addr);
 
     axum::serve(listener, app).await?;

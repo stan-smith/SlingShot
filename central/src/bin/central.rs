@@ -1,5 +1,6 @@
 use admin_web::{broadcast, request_approval, run_admin_server, AdminCommand, AdminState};
 use anyhow::Result;
+use config_manager::CentralConfig;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSrc;
 use gstreamer_rtsp_server::prelude::*;
@@ -45,12 +46,17 @@ async fn async_main() -> Result<()> {
     // Parse CLI arguments
     let args: Vec<String> = env::args().collect();
     let headless = args.iter().any(|a| a == "--headless");
-    let admin_port: u16 = args
-        .iter()
-        .position(|a| a == "--admin-port")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8081);
+
+    // Load configuration (require config file to exist)
+    let config = match CentralConfig::load() {
+        Ok(c) => c,
+        Err(_) => {
+            eprintln!("No configuration found.");
+            eprintln!();
+            eprintln!("Run 'kaiju-central-setup' to configure network bindings before starting.");
+            std::process::exit(1);
+        }
+    };
 
     println!("==========================================");
     println!("RTSP STREAM CONTROLLER - Central Node");
@@ -59,7 +65,9 @@ async fn async_main() -> Result<()> {
 
     // Create RTSP server for relaying streams
     let rtsp_server = gstreamer_rtsp_server::RTSPServer::new();
-    rtsp_server.set_service("8554");
+    rtsp_server.set_service(&config.rtsp_port.to_string());
+    // Note: gstreamer-rtsp-server binds to 0.0.0.0 by default and doesn't support
+    // binding to specific interfaces easily. We set the port from config.
     let mounts = rtsp_server.mount_points().expect("Failed to get mount points");
     let mounts = Arc::new(mounts);
 
@@ -74,7 +82,7 @@ async fn async_main() -> Result<()> {
     // Give the GLib loop a moment to start
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    println!("RTSP relay server listening on port 8554");
+    println!("RTSP relay server listening on port {}", config.rtsp_port);
 
     // Generate self-signed Ed25519 certificate for QUIC
     let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
@@ -105,11 +113,18 @@ async fn async_main() -> Result<()> {
     let mut server_config = ServerConfig::with_crypto(Arc::new(quic_server_config));
     server_config.transport_config(Arc::new(quic_common::video_transport_config()));
 
-    let bind_addr: SocketAddr = "0.0.0.0:5001".parse()?;
+    // Bind QUIC server to first configured interface (QUIC/quinn only supports one endpoint)
+    let quic_bind = config.quic_addrs().into_iter().next()
+        .unwrap_or_else(|| format!("0.0.0.0:{}", config.quic_port));
+    let bind_addr: SocketAddr = quic_bind.parse()?;
     let endpoint = Endpoint::server(server_config, bind_addr)?;
 
-    println!("QUIC control server listening on port 5001");
-    println!("Admin web interface at http://127.0.0.1:{}", admin_port);
+    println!("QUIC control server listening on {}", bind_addr);
+
+    // Print admin web endpoint
+    if let Some(addr) = config.admin_addrs().into_iter().next() {
+        println!("Admin web interface at http://{}", addr);
+    }
     if headless {
         println!("Running in headless mode (no stdin)");
     }
@@ -125,27 +140,31 @@ async fn async_main() -> Result<()> {
     let onvif_nodes: Arc<tokio::sync::Mutex<HashMap<String, NodeHandle>>> =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
-    // Share mounts for adding relay factories
     // Get local IP for ONVIF server
     let local_ip = get_local_ip().unwrap_or_else(|| "127.0.0.1".to_string());
 
     // Start ONVIF server
-    let onvif_addr: SocketAddr = "0.0.0.0:8080".parse()?;
+    let onvif_addr: SocketAddr = config.onvif_addrs().into_iter().next()
+        .unwrap_or_else(|| format!("0.0.0.0:{}", config.onvif_port))
+        .parse()?;
     let onvif_nodes_clone = Arc::clone(&onvif_nodes);
     tokio::spawn(async move {
         if let Err(e) = run_onvif_server(onvif_addr, onvif_nodes_clone, local_ip).await {
             eprintln!("ONVIF server error: {}", e);
         }
     });
+    println!("ONVIF server listening on http://{}", onvif_addr);
 
     // Create admin state and channel
     let (admin_cmd_tx, mut admin_cmd_rx) = mpsc::channel::<AdminCommand>(100);
     let admin_state = Arc::new(AdminState::new(admin_cmd_tx));
 
     // Start admin web server
+    let admin_addr = config.admin_addrs().into_iter().next()
+        .unwrap_or_else(|| format!("0.0.0.0:{}", config.admin_port));
     let admin_state_clone = Arc::clone(&admin_state);
     tokio::spawn(async move {
-        if let Err(e) = run_admin_server(admin_port, admin_state_clone).await {
+        if let Err(e) = run_admin_server(&admin_addr, admin_state_clone).await {
             eprintln!("Admin server error: {}", e);
         }
     });
@@ -779,10 +798,11 @@ fn print_help() {
     println!("  help                         - Show this help");
     println!("  quit                         - Exit");
     println!();
-    println!("Relayed streams: rtsp://127.0.0.1:8554/<node>/stream");
-    println!("ONVIF PTZ:       http://127.0.0.1:8080/onvif/<node>/ptz_service");
+    println!("Relayed streams: rtsp://<host>:<port>/<node>/stream");
+    println!("ONVIF PTZ:       http://<host>:<port>/onvif/<node>/ptz_service");
     println!();
     println!("Options:");
     println!("  --headless                   - Run without stdin (admin via web only)");
-    println!("  --admin-port <port>          - Admin web port (default: 8081)");
+    println!();
+    println!("Configuration: Run 'kaiju-central-setup' to configure network bindings and ports.");
 }

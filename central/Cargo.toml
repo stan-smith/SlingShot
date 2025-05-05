@@ -34,6 +34,9 @@ onvif-server = { path = "../onvif-server" }
 # Admin web interface
 admin-web = { path = "../admin-web" }
 
+# Configuration management
+config-manager = { path = "../config-manager" }
+
 # HTTP server (for test_remote)
 axum = "0.8"
 

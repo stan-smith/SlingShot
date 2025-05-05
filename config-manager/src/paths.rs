@@ -16,6 +16,12 @@ pub fn remote_config_path() -> Result<PathBuf, ConfigError> {
     Ok(config_dir()?.join("remote.toml"))
 }
 
+/// Get default config file path for central node
+/// Returns ~/.config/kaiju/central.toml
+pub fn central_config_path() -> Result<PathBuf, ConfigError> {
+    Ok(config_dir()?.join("central.toml"))
+}
+
 /// Ensure config directory exists, creating it if necessary
 pub fn ensure_config_dir() -> Result<PathBuf, ConfigError> {
     let dir = config_dir()?;

@@ -13,4 +13,5 @@ members = [
     "recording-retrieval",
     "config-manager",
     "remote-setup",
+    "central-setup",
 ]
