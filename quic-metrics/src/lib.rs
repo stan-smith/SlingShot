@@ -16,8 +16,8 @@ static METRICS_STATE: Mutex<Option<MetricsState>> = Mutex::new(None);
 
 /// Log QUIC connection statistics to stdout
 ///
-/// Outputs RTT, congestion window, packet loss, and bytes sent/received with interval rate.
-/// Format: `[QUIC:node_name] rtt=12ms cwnd=14720 loss=0.0% tx=23.1KB (+1.2MB/s) rx=45.2KB`
+/// Outputs RTT, congestion window, packet loss, and bytes sent/received with interval rates.
+/// Format: `[QUIC:node_name] rtt=12ms cwnd=14720 loss=0.0% tx=23.1KB (+1.2MB/s) rx=45.2KB (+500KB/s)`
 pub fn log_stats(conn: &quinn::Connection, node_name: &str) {
     let stats = conn.stats();
     let loss_pct = if stats.path.sent_packets > 0 {
@@ -30,18 +30,19 @@ pub fn log_stats(conn: &quinn::Connection, node_name: &str) {
     let current_tx = stats.udp_tx.bytes;
     let current_rx = stats.udp_rx.bytes;
 
-    // Calculate interval rate
+    // Calculate interval rates
     let mut state = METRICS_STATE.lock().unwrap();
-    let tx_rate = if let Some(ref prev) = *state {
+    let (tx_rate, rx_rate) = if let Some(ref prev) = *state {
         let elapsed = now.duration_since(prev.last_time).as_secs_f64();
         if elapsed > 0.0 {
             let tx_delta = current_tx.saturating_sub(prev.last_tx_bytes);
-            Some(tx_delta as f64 / elapsed)
+            let rx_delta = current_rx.saturating_sub(prev.last_rx_bytes);
+            (Some(tx_delta as f64 / elapsed), Some(rx_delta as f64 / elapsed))
         } else {
-            None
+            (None, None)
         }
     } else {
-        None
+        (None, None)
     };
 
     // Update state
@@ -54,10 +55,11 @@ pub fn log_stats(conn: &quinn::Connection, node_name: &str) {
 
     let tx = format_bytes(current_tx);
     let rx = format_bytes(current_rx);
-    let rate_str = tx_rate.map(|r| format!(" (+{})", format_rate(r))).unwrap_or_default();
+    let tx_rate_str = tx_rate.map(|r| format!(" (+{})", format_rate(r))).unwrap_or_default();
+    let rx_rate_str = rx_rate.map(|r| format!(" (+{})", format_rate(r))).unwrap_or_default();
 
     println!(
-        "[QUIC:{}] rtt={}ms cwnd={} loss={:.1}% ({}/{} pkts) tx={}{} rx={}",
+        "[QUIC:{}] rtt={}ms cwnd={} loss={:.1}% ({}/{} pkts) tx={}{} rx={}{}",
         node_name,
         stats.path.rtt.as_millis(),
         stats.path.cwnd,
@@ -65,8 +67,9 @@ pub fn log_stats(conn: &quinn::Connection, node_name: &str) {
         stats.path.lost_packets,
         stats.path.sent_packets,
         tx,
-        rate_str,
-        rx
+        tx_rate_str,
+        rx,
+        rx_rate_str
     );
 }
 
