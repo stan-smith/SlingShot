@@ -1,6 +1,7 @@
 use admin_web::{broadcast, request_approval, run_admin_server, AdminCommand, AdminState};
 use anyhow::Result;
 use config_manager::CentralConfig;
+use fingerprint_store::FingerprintStore;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSrc;
 use gstreamer_rtsp_server::prelude::*;
@@ -55,6 +56,25 @@ async fn async_main() -> Result<()> {
             eprintln!();
             eprintln!("Run 'kaiju-central-setup' to configure network bindings before starting.");
             std::process::exit(1);
+        }
+    };
+
+    // Initialize fingerprint store for auto-approval
+    let fingerprint_store = match FingerprintStore::open() {
+        Ok(store) => {
+            if let Ok(path) = FingerprintStore::default_path() {
+                println!("Fingerprint store: {}", path.display());
+            }
+            Arc::new(tokio::sync::Mutex::new(store))
+        }
+        Err(e) => {
+            eprintln!("Warning: Could not open fingerprint store: {}", e);
+            eprintln!("Auto-approval for known nodes will be disabled.");
+            // Use in-memory store as fallback
+            Arc::new(tokio::sync::Mutex::new(
+                FingerprintStore::open_at(std::path::Path::new(":memory:"))
+                    .expect("Failed to create in-memory store"),
+            ))
         }
     };
 
@@ -196,6 +216,7 @@ async fn async_main() -> Result<()> {
     let onvif_nodes_clone = Arc::clone(&onvif_nodes);
     let mounts_clone = Arc::clone(&mounts);
     let admin_state_conn = Arc::clone(&admin_state);
+    let fingerprint_store_conn = Arc::clone(&fingerprint_store);
     let endpoint_clone = endpoint.clone();
     tokio::spawn(async move {
         loop {
@@ -204,9 +225,10 @@ async fn async_main() -> Result<()> {
                 let onvif_nodes = Arc::clone(&onvif_nodes_clone);
                 let mounts = Arc::clone(&mounts_clone);
                 let admin_state = Arc::clone(&admin_state_conn);
+                let fp_store = Arc::clone(&fingerprint_store_conn);
                 tokio::spawn(async move {
                     if let Err(e) =
-                        handle_connection(incoming, nodes, onvif_nodes, mounts, admin_state).await
+                        handle_connection(incoming, nodes, onvif_nodes, mounts, admin_state, fp_store).await
                     {
                         eprintln!("Connection error: {}", e);
                     }
@@ -343,6 +365,7 @@ async fn handle_connection(
     onvif_nodes: Arc<tokio::sync::Mutex<HashMap<String, NodeHandle>>>,
     mounts: Arc<gstreamer_rtsp_server::RTSPMountPoints>,
     admin_state: Arc<AdminState>,
+    fingerprint_store: Arc<tokio::sync::Mutex<FingerprintStore>>,
 ) -> Result<()> {
     let connection = incoming.await?;
     let remote = connection.remote_address();
@@ -377,15 +400,64 @@ async fn handle_connection(
     println!("  Video Mode: {}", if video_mode { "QUIC" } else { "Legacy RTSP" });
     println!("==========================================");
 
-    // Request approval via admin web interface
-    let approved = request_approval(
-        &admin_state,
-        node_name.clone(),
-        fingerprint.clone(),
-        format!("Video over QUIC from {}", remote),
-        remote.to_string(),
-    )
-    .await;
+    // Check if fingerprint is already approved
+    let approved = {
+        let store = fingerprint_store.lock().await;
+        match store.is_approved(&fingerprint) {
+            Ok(Some(existing)) => {
+                // Previously approved node reconnecting
+                println!(
+                    "Auto-approving known node '{}' (fingerprint: {}...)",
+                    existing.node_name,
+                    &fingerprint[..16.min(fingerprint.len())]
+                );
+                // Update last_seen timestamp
+                if let Err(e) = store.update_last_seen(&fingerprint) {
+                    eprintln!("Warning: Could not update last_seen: {}", e);
+                }
+                true
+            }
+            Ok(None) => {
+                // New node - needs manual approval
+                drop(store); // Release lock before blocking on approval
+                let manual_approved = request_approval(
+                    &admin_state,
+                    node_name.clone(),
+                    fingerprint.clone(),
+                    format!("Video over QUIC from {}", remote),
+                    remote.to_string(),
+                )
+                .await;
+
+                if manual_approved {
+                    // Store the newly approved fingerprint
+                    let store = fingerprint_store.lock().await;
+                    if let Err(e) = store.approve(&fingerprint, &node_name, Some("admin")) {
+                        eprintln!("Warning: Could not store approved fingerprint: {}", e);
+                    } else {
+                        println!(
+                            "Stored fingerprint for '{}' in approved nodes database",
+                            node_name
+                        );
+                    }
+                }
+                manual_approved
+            }
+            Err(e) => {
+                eprintln!("Warning: Could not check fingerprint store: {}", e);
+                // Fall back to manual approval on error
+                drop(store);
+                request_approval(
+                    &admin_state,
+                    node_name.clone(),
+                    fingerprint.clone(),
+                    format!("Video over QUIC from {}", remote),
+                    remote.to_string(),
+                )
+                .await
+            }
+        }
+    };
 
     let mut send_stream = connection.open_uni().await?;
 

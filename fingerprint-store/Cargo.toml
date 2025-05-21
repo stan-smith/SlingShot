@@ -1,0 +1,11 @@
+[package]
+name = "fingerprint-store"
+version = "0.1.0"
+edition = "2021"
+description = "SQLite-backed fingerprint storage for kaiju central node"
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+dirs = "5"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }

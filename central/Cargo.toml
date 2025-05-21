@@ -52,6 +52,9 @@ quic-video = { path = "../quic-video" }
 # Recording retrieval
 recording-retrieval = { path = "../recording-retrieval" }
 
+# Fingerprint storage
+fingerprint-store = { path = "../fingerprint-store" }
+
 # Home directory
 dirs = "5"
 

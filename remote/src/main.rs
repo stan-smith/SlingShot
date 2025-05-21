@@ -3,7 +3,8 @@ mod storage;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use config_manager::{
-    OnvifConfig, RemoteConfig, RtspConfig, SourceConfig, StorageConfig as CfgStorageConfig,
+    IdentityConfig, OnvifConfig, RemoteConfig, RtspConfig, SourceConfig,
+    StorageConfig as CfgStorageConfig,
 };
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use ffmpeg_recorder::{ensure_disk_space, Recorder, RecorderConfig};
@@ -195,11 +196,34 @@ async fn async_main(mut config: RemoteConfig, save_config: bool) -> Result<()> {
         }
     }
 
-    // Generate Ed25519 keypair for fingerprinting
-    let secret_bytes: [u8; 32] = rand::random();
-    let signing_key = SigningKey::from_bytes(&secret_bytes);
-    let verifying_key: VerifyingKey = (&signing_key).into();
-    let fingerprint = hex::encode(verifying_key.as_bytes());
+    // Load or generate persistent identity
+    let (signing_key, fingerprint) = if IdentityConfig::exists() {
+        // Load existing identity
+        let identity = IdentityConfig::load()?;
+        let secret_bytes = identity.secret_bytes()?;
+        let signing_key = SigningKey::from_bytes(&secret_bytes);
+        let verifying_key: VerifyingKey = (&signing_key).into();
+        let fingerprint = hex::encode(verifying_key.as_bytes());
+        println!(
+            "Loaded identity from {}",
+            IdentityConfig::default_path()?.display()
+        );
+        (signing_key, fingerprint)
+    } else {
+        // Generate new identity and save
+        let secret_bytes: [u8; 32] = rand::random();
+        let identity = IdentityConfig::new(&secret_bytes);
+        identity.save()?;
+        let signing_key = SigningKey::from_bytes(&secret_bytes);
+        let verifying_key: VerifyingKey = (&signing_key).into();
+        let fingerprint = hex::encode(verifying_key.as_bytes());
+        println!(
+            "Generated new identity, saved to {}",
+            IdentityConfig::default_path()?.display()
+        );
+        (signing_key, fingerprint)
+    };
+    let _ = signing_key; // Silence unused warning - kept for potential future signing
 
     println!("Fingerprint: {}", &fingerprint[..32]);
     println!();

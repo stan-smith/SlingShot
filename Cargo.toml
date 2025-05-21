@@ -14,4 +14,5 @@ members = [
     "config-manager",
     "remote-setup",
     "central-setup",
+    "fingerprint-store",
 ]
