@@ -383,14 +383,15 @@ async fn handle_connection(
     }
 
     let parts: Vec<&str> = message.split('|').collect();
-    if parts.len() != 4 {
-        println!("Malformed auth from {} (expected AUTH|name|fingerprint|VIDEO)", remote);
+    if parts.len() < 4 || parts.len() > 5 {
+        println!("Malformed auth from {} (expected AUTH|name|fingerprint|VIDEO[|ENCRYPT/NOENC])", remote);
         return Ok(());
     }
 
     let node_name = parts[1].to_string();
     let fingerprint = parts[2].to_string();
     let video_mode = parts[3] == "VIDEO";
+    let encryption_requested = parts.get(4).map(|&s| s == "ENCRYPT").unwrap_or(false);
 
     println!("==========================================");
     println!("AUTHENTICATION REQUEST");
@@ -398,6 +399,7 @@ async fn handle_connection(
     println!("  Address: {}", remote);
     println!("  Fingerprint: {}", &fingerprint[..32.min(fingerprint.len())]);
     println!("  Video Mode: {}", if video_mode { "QUIC" } else { "Legacy RTSP" });
+    println!("  Encryption: {}", if encryption_requested { "requested" } else { "not requested" });
     println!("==========================================");
 
     // Check if fingerprint is already approved
@@ -462,11 +464,33 @@ async fn handle_connection(
     let mut send_stream = connection.open_uni().await?;
 
     if approved {
-        let response = format!("APPROVED|Welcome, {}!", node_name);
+        // Generate encryption key if requested
+        let encryption_pubkey = if encryption_requested {
+            let store = fingerprint_store.lock().await;
+            match store.generate_encryption_key(&fingerprint) {
+                Ok(pubkey) => {
+                    println!("Generated/retrieved encryption key for {}", node_name);
+                    Some(pubkey)
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to generate encryption key: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Build response: APPROVED|message or APPROVED|message|pubkey_hex
+        let response = if let Some(ref pubkey) = encryption_pubkey {
+            format!("APPROVED|Welcome, {}!|{}", node_name, pubkey)
+        } else {
+            format!("APPROVED|Welcome, {}!", node_name)
+        };
         send_stream.write_all(response.as_bytes()).await?;
         send_stream.finish()?;
 
-        println!("Approved {}", node_name);
+        println!("Approved {} (encryption: {})", node_name, if encryption_pubkey.is_some() { "enabled" } else { "disabled" });
 
         // Wait for confirmation
         let mut confirm_stream = connection.accept_uni().await?;
@@ -737,6 +761,15 @@ async fn handle_connection(
                             } else if first_byte >= 32 && first_byte <= 126 {
                                 // Command response (text)
                                 let msg = String::from_utf8_lossy(&data);
+
+                                // Handle heartbeat from remote
+                                if msg.starts_with("HEARTBEAT|") {
+                                    let ack = msg.replace("HEARTBEAT|", "HEARTBEAT_ACK|");
+                                    let mut send_stream = connection.open_uni().await?;
+                                    send_stream.write_all(ack.as_bytes()).await?;
+                                    send_stream.finish()?;
+                                    continue;
+                                }
 
                                 let broadcast_msg = if msg.starts_with("RESULT|") {
                                     let parts: Vec<&str> = msg.splitn(3, '|').collect();

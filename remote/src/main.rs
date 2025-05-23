@@ -3,7 +3,7 @@ mod storage;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use config_manager::{
-    IdentityConfig, OnvifConfig, RemoteConfig, RtspConfig, SourceConfig,
+    EncryptionConfig, IdentityConfig, OnvifConfig, RemoteConfig, RtspConfig, SourceConfig,
     StorageConfig as CfgStorageConfig,
 };
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -18,7 +18,15 @@ use recording_retrieval::{
 use std::io::{self, BufRead, Write};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
+
+/// Heartbeat interval in seconds
+const HEARTBEAT_INTERVAL_SECS: u64 = 10;
+/// Timeout waiting for heartbeat ACK (must be > HEARTBEAT_INTERVAL_SECS)
+const HEARTBEAT_TIMEOUT_SECS: u64 = 15;
+/// Reconnect attempt interval in seconds
+const RECONNECT_INTERVAL_SECS: u64 = 10;
 
 /// Remote Node - Video Streamer with ONVIF Camera Control
 ///
@@ -100,6 +108,23 @@ struct PipelineState {
     source_framerate: Option<i32>,
 }
 
+/// Connection state for managing heartbeat and reconnection
+struct ConnectionState {
+    /// Timestamp of last sent heartbeat (for timeout detection)
+    last_heartbeat_sent: Option<Instant>,
+    /// Whether we're waiting for an ACK
+    awaiting_ack: bool,
+}
+
+impl Default for ConnectionState {
+    fn default() -> Self {
+        Self {
+            last_heartbeat_sent: None,
+            awaiting_ack: false,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -154,6 +179,7 @@ fn load_or_build_config(cli: &Cli) -> Result<(RemoteConfig, bool)> {
             source: cli_source_to_config(source),
             recording: config_manager::RecordingConfig::default(),
             storage: CfgStorageConfig::default(),
+            encryption_enabled: false,
         };
 
         Ok((config, true)) // Will save after prompts
@@ -373,7 +399,7 @@ async fn async_main(mut config: RemoteConfig, save_config: bool) -> Result<()> {
     }));
 
     // Create channel for video frames (will be sent over QUIC)
-    let (frame_tx, frame_rx) = mpsc::channel::<quic_video::VideoFrame>(30);
+    let (frame_tx, mut frame_rx) = mpsc::channel::<quic_video::VideoFrame>(30);
 
     // Create GStreamer pipeline with appsink (video goes over QUIC, not local RTSP)
     let gst_pipeline = gstreamer::Pipeline::new();
@@ -553,191 +579,355 @@ async fn async_main(mut config: RemoteConfig, save_config: bool) -> Result<()> {
     };
     println!();
 
-    // Connect to central node
-    println!("Connecting to central node at {}...", config.central_address);
-
-    let client_config = quic_common::create_client_config()?;
-
-    let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
-    let endpoint = Endpoint::client(bind_addr)?;
-
+    // Parse remote address once (outside reconnect loop)
     let remote_addr: SocketAddr = config.central_address.parse()?;
-    let connection = endpoint
-        .connect_with(client_config, remote_addr, "localhost")?
-        .await?;
 
-    println!("Connected to central node");
+    // Reconnection loop - keeps trying to connect to central
+    'reconnect: loop {
+        // Drain any stale frames from previous connection
+        while frame_rx.try_recv().is_ok() {}
 
-    // Send authentication request: AUTH|name|fingerprint|VIDEO
-    // The "VIDEO" marker indicates this node will stream video over QUIC (not RTSP)
-    let mut send_stream = connection.open_uni().await?;
-    let auth_request = format!("AUTH|{}|{}|VIDEO", config.node_name, fingerprint);
-    send_stream.write_all(auth_request.as_bytes()).await?;
-    send_stream.finish()?;
+        println!("Connecting to central node at {}...", config.central_address);
 
-    println!("Authentication request sent, waiting for approval...");
-
-    // Wait for approval/denial
-    let mut recv_stream = connection.accept_uni().await?;
-    let buffer = recv_stream.read_to_end(1024 * 1024).await?;
-    let response = String::from_utf8_lossy(&buffer);
-
-    if response.starts_with("APPROVED") {
-        println!("Approved by central node!");
-
-        // Send confirmation
-        let mut confirm_stream = connection.open_uni().await?;
-        let confirmation = format!("CONFIRM|{}|Ready - Camera: {}", config.node_name, device_info);
-        confirm_stream.write_all(confirmation.as_bytes()).await?;
-        confirm_stream.finish()?;
-
-        // Send VIDEO_STREAM marker so central knows to expect stream-per-frame video
-        let mut marker_stream = connection.open_uni().await?;
-        marker_stream.write_all(b"VIDEO_STREAM").await?;
-        marker_stream.finish()?;
-
-        println!();
-        println!("==========================================");
-        println!("READY - Streaming video (stream-per-frame)");
-        println!("==========================================");
-        println!();
-
-        // Spawn video sender task - one QUIC stream per frame
-        let node_name_clone = config.node_name.clone();
-        let conn_clone = connection.clone();
-        let video_handle = tokio::spawn(async move {
-            let mut frame_rx = frame_rx;
-            let mut frame_count = 0u64;
-            let mut bytes_sent = 0u64;
-            let mut last_report_time = std::time::Instant::now();
-            let mut last_report_bytes = 0u64;
-
-            while let Some(frame) = frame_rx.recv().await {
-                let encoded = frame.encode();
-                let frame_size = encoded.len();
-
-                // Open new stream for this frame, write, finish
-                let stream_result = conn_clone.open_uni().await;
-                let mut stream = match stream_result {
-                    Ok(s) => s,
-                    Err(_) => break,
-                };
-                if stream.write_all(&encoded).await.is_err() {
-                    break;
-                }
-                if stream.finish().is_err() {
-                    break;
-                }
-
-                frame_count += 1;
-                bytes_sent += frame_size as u64;
-
-                // Print stats every 30 frames (about once per second)
-                if frame_count % 30 == 0 {
-                    let now = std::time::Instant::now();
-                    let interval_secs = now.duration_since(last_report_time).as_secs_f64();
-                    let interval_bytes = bytes_sent - last_report_bytes;
-                    let mbps = if interval_secs > 0.0 {
-                        (interval_bytes as f64 * 8.0) / (interval_secs * 1_000_000.0)
-                    } else {
-                        0.0
-                    };
-
-                    println!(
-                        "[{}] {} frames, {:.1} MB total, {:.2} Mbps{}",
-                        node_name_clone,
-                        frame_count,
-                        bytes_sent as f64 / 1_000_000.0,
-                        mbps,
-                        if frame.is_keyframe { " [KEY]" } else { "" }
-                    );
-
-                    last_report_time = now;
-                    last_report_bytes = bytes_sent;
-                }
+        let client_config = match quic_common::create_client_config() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Failed to create QUIC config: {}. Retrying in {}s...", e, RECONNECT_INTERVAL_SECS);
+                tokio::time::sleep(Duration::from_secs(RECONNECT_INTERVAL_SECS)).await;
+                continue 'reconnect;
             }
+        };
 
-            println!("[{}] Video stream ended", node_name_clone);
-        });
+        let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
+        let endpoint = match Endpoint::client(bind_addr) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("Failed to create QUIC endpoint: {}. Retrying in {}s...", e, RECONNECT_INTERVAL_SECS);
+                tokio::time::sleep(Duration::from_secs(RECONNECT_INTERVAL_SECS)).await;
+                continue 'reconnect;
+            }
+        };
 
-        // Command loop with periodic recorder health check
-        let mut health_check_interval = tokio::time::interval(std::time::Duration::from_secs(5));
-        loop {
-            tokio::select! {
-                result = connection.accept_uni() => {
-                    match result {
-                        Ok(mut recv_stream) => {
-                            let buffer = recv_stream.read_to_end(1024 * 1024).await?;
-                            let msg = String::from_utf8_lossy(&buffer);
+        let connection = match endpoint.connect_with(client_config, remote_addr, "localhost") {
+            Ok(connecting) => match connecting.await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    eprintln!("Connection failed: {}. Retrying in {}s...", e, RECONNECT_INTERVAL_SECS);
+                    tokio::time::sleep(Duration::from_secs(RECONNECT_INTERVAL_SECS)).await;
+                    continue 'reconnect;
+                }
+            },
+            Err(e) => {
+                eprintln!("Failed to initiate connection: {}. Retrying in {}s...", e, RECONNECT_INTERVAL_SECS);
+                tokio::time::sleep(Duration::from_secs(RECONNECT_INTERVAL_SECS)).await;
+                continue 'reconnect;
+            }
+        };
 
-                            if msg.starts_with("CMD|") {
-                                let cmd = msg.strip_prefix("CMD|").unwrap_or("");
-                                println!("Received command: {}", cmd);
+        println!("Connected to central node");
 
-                                // Check for recordings command (needs special handling)
-                                let parts: Vec<&str> = cmd.split_whitespace().collect();
-                                if !parts.is_empty() && parts[0].to_lowercase() == "recordings" {
-                                    let storage = storage::Storage::new();
-                                    let conn_clone = connection.clone();
+        // Send authentication request: AUTH|name|fingerprint|VIDEO|ENCRYPT or NOENC
+        // The "VIDEO" marker indicates this node will stream video over QUIC (not RTSP)
+        // The "ENCRYPT/NOENC" marker indicates whether encryption key is requested
+        let mut send_stream = match connection.open_uni().await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to open auth stream: {}. Retrying in {}s...", e, RECONNECT_INTERVAL_SECS);
+                tokio::time::sleep(Duration::from_secs(RECONNECT_INTERVAL_SECS)).await;
+                continue 'reconnect;
+            }
+        };
+        let encrypt_flag = if config.encryption_enabled { "ENCRYPT" } else { "NOENC" };
+        let auth_request = format!(
+            "AUTH|{}|{}|VIDEO|{}",
+            config.node_name, fingerprint, encrypt_flag
+        );
+        if let Err(e) = send_stream.write_all(auth_request.as_bytes()).await {
+            eprintln!("Failed to send auth request: {}. Retrying in {}s...", e, RECONNECT_INTERVAL_SECS);
+            tokio::time::sleep(Duration::from_secs(RECONNECT_INTERVAL_SECS)).await;
+            continue 'reconnect;
+        }
+        let _ = send_stream.finish();
 
-                                    // Handle recordings command
-                                    let response = match handle_recordings_command(&parts[1..], &storage, &conn_clone).await {
-                                        Ok(msg) => format!("RESULT|ok|{}", msg),
-                                        Err(e) => format!("RESULT|error|{}", e),
-                                    };
+        println!(
+            "Authentication request sent (encryption: {}), waiting for approval...",
+            if config.encryption_enabled {
+                "requested"
+            } else {
+                "disabled"
+            }
+        );
 
-                                    let mut send_stream = connection.open_uni().await?;
-                                    send_stream.write_all(response.as_bytes()).await?;
-                                    send_stream.finish()?;
-                                } else {
-                                    let result = handle_command(cmd, &onvif, &pipeline_state);
+        // Wait for approval/denial
+        // Response format: APPROVED|message or APPROVED|message|pubkey_hex
+        let mut recv_stream = match connection.accept_uni().await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to receive auth response: {}. Retrying in {}s...", e, RECONNECT_INTERVAL_SECS);
+                tokio::time::sleep(Duration::from_secs(RECONNECT_INTERVAL_SECS)).await;
+                continue 'reconnect;
+            }
+        };
+        let buffer = match recv_stream.read_to_end(1024 * 1024).await {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("Failed to read auth response: {}. Retrying in {}s...", e, RECONNECT_INTERVAL_SECS);
+                tokio::time::sleep(Duration::from_secs(RECONNECT_INTERVAL_SECS)).await;
+                continue 'reconnect;
+            }
+        };
+        let response = String::from_utf8_lossy(&buffer);
 
-                                    // Send result back
-                                    let mut send_stream = connection.open_uni().await?;
-                                    let response = match result {
-                                        Ok(msg) => format!("RESULT|ok|{}", msg),
-                                        Err(e) => format!("RESULT|error|{}", e),
-                                    };
-                                    send_stream.write_all(response.as_bytes()).await?;
-                                    send_stream.finish()?;
-                                }
+        if response.starts_with("APPROVED") {
+            println!("Approved by central node!");
+
+            // Parse APPROVED response for optional encryption key
+            let parts: Vec<&str> = response.split('|').collect();
+            if config.encryption_enabled {
+                if parts.len() >= 3 {
+                    let pubkey_hex = parts[2];
+                    // Validate and store the encryption key
+                    match EncryptionConfig::new(pubkey_hex) {
+                        Ok(enc_config) => {
+                            if let Err(e) = enc_config.save() {
+                                eprintln!("Failed to save encryption key: {}. Retrying...", e);
+                                tokio::time::sleep(Duration::from_secs(RECONNECT_INTERVAL_SECS)).await;
+                                continue 'reconnect;
                             }
+                            println!("Encryption key received and stored");
                         }
                         Err(e) => {
-                            println!("Disconnected from central: {}", e);
-                            break;
+                            eprintln!("Error: Invalid encryption key from central: {}", e);
+                            eprintln!("Encryption was requested but key is invalid. Aborting.");
+                            break 'reconnect;
                         }
                     }
+                } else {
+                    eprintln!("Error: Encryption was requested but no key received from central.");
+                    eprintln!("Central may not support encryption. Aborting.");
+                    break 'reconnect;
                 }
-                _ = health_check_interval.tick() => {
-                    // Log QUIC connection stats
-                    quic_metrics::log_stats(&connection, &config.node_name);
+            }
 
-                    // Check recorder health
-                    if let Some(ref mut rec) = recorder {
-                        if let Err(e) = rec.check_and_restart() {
-                            eprintln!("Recorder error: {}", e);
+            // Send confirmation
+            let mut confirm_stream = match connection.open_uni().await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to send confirmation: {}. Retrying...", e);
+                    tokio::time::sleep(Duration::from_secs(RECONNECT_INTERVAL_SECS)).await;
+                    continue 'reconnect;
+                }
+            };
+            let confirmation = format!("CONFIRM|{}|Ready - Camera: {}", config.node_name, device_info);
+            let _ = confirm_stream.write_all(confirmation.as_bytes()).await;
+            let _ = confirm_stream.finish();
+
+            // Send VIDEO_STREAM marker so central knows to expect stream-per-frame video
+            let mut marker_stream = match connection.open_uni().await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to send video marker: {}. Retrying...", e);
+                    tokio::time::sleep(Duration::from_secs(RECONNECT_INTERVAL_SECS)).await;
+                    continue 'reconnect;
+                }
+            };
+            let _ = marker_stream.write_all(b"VIDEO_STREAM").await;
+            let _ = marker_stream.finish();
+
+            println!();
+            println!("==========================================");
+            println!("READY - Streaming video (stream-per-frame)");
+            println!("==========================================");
+            println!();
+
+            // Video frame stats (integrated into main loop for reconnection support)
+            let mut frame_count = 0u64;
+            let mut bytes_sent = 0u64;
+            let mut last_report_time = Instant::now();
+            let mut last_report_bytes = 0u64;
+
+            // Command loop with video sending, heartbeat, and periodic recorder health check
+            let mut health_check_interval = tokio::time::interval(Duration::from_secs(5));
+            let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+            let mut conn_state = ConnectionState::default();
+            loop {
+                tokio::select! {
+                    // Send video frames over QUIC
+                    Some(frame) = frame_rx.recv() => {
+                        let encoded = frame.encode();
+                        let frame_size = encoded.len();
+
+                        // Open new stream for this frame, write, finish
+                        match connection.open_uni().await {
+                            Ok(mut stream) => {
+                                if stream.write_all(&encoded).await.is_err() {
+                                    println!("Failed to send video frame");
+                                    break;
+                                }
+                                let _ = stream.finish();
+                            }
+                            Err(e) => {
+                                println!("Failed to open stream for video: {}", e);
+                                break;
+                            }
                         }
-                        // Ensure disk space by deleting old recordings if needed
-                        if let Err(e) = ensure_disk_space(
-                            &rec.config().output_dir,
-                            rec.config().disk_reserve_percent,
-                            &rec.config().file_format,
-                        ) {
-                            eprintln!("WARNING: Could not ensure disk space: {}", e);
+
+                        frame_count += 1;
+                        bytes_sent += frame_size as u64;
+
+                        // Print stats every 30 frames (about once per second)
+                        if frame_count % 30 == 0 {
+                            let now = Instant::now();
+                            let interval_secs = now.duration_since(last_report_time).as_secs_f64();
+                            let interval_bytes = bytes_sent - last_report_bytes;
+                            let mbps = if interval_secs > 0.0 {
+                                (interval_bytes as f64 * 8.0) / (interval_secs * 1_000_000.0)
+                            } else {
+                                0.0
+                            };
+
+                            println!(
+                                "[{}] {} frames, {:.1} MB total, {:.2} Mbps{}",
+                                config.node_name,
+                                frame_count,
+                                bytes_sent as f64 / 1_000_000.0,
+                                mbps,
+                                if frame.is_keyframe { " [KEY]" } else { "" }
+                            );
+
+                            last_report_time = now;
+                            last_report_bytes = bytes_sent;
+                        }
+                    }
+                    result = connection.accept_uni() => {
+                        match result {
+                            Ok(mut recv_stream) => {
+                                let buffer = match recv_stream.read_to_end(1024 * 1024).await {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        eprintln!("Stream read error: {}", e);
+                                        continue;
+                                    }
+                                };
+                                let msg = String::from_utf8_lossy(&buffer);
+
+                                // Handle heartbeat ACK from central
+                                if msg.starts_with("HEARTBEAT_ACK|") {
+                                    conn_state.awaiting_ack = false;
+                                    continue;
+                                }
+
+                                if msg.starts_with("CMD|") {
+                                    let cmd = msg.strip_prefix("CMD|").unwrap_or("");
+                                    println!("Received command: {}", cmd);
+
+                                    // Check for recordings command (needs special handling)
+                                    let parts: Vec<&str> = cmd.split_whitespace().collect();
+                                    if !parts.is_empty() && parts[0].to_lowercase() == "recordings" {
+                                        let storage = storage::Storage::new();
+                                        let conn_clone = connection.clone();
+
+                                        // Handle recordings command
+                                        let response = match handle_recordings_command(&parts[1..], &storage, &conn_clone).await {
+                                            Ok(msg) => format!("RESULT|ok|{}", msg),
+                                            Err(e) => format!("RESULT|error|{}", e),
+                                        };
+
+                                        if let Ok(mut send_stream) = connection.open_uni().await {
+                                            let _ = send_stream.write_all(response.as_bytes()).await;
+                                            let _ = send_stream.finish();
+                                        }
+                                    } else {
+                                        let result = handle_command(cmd, &onvif, &pipeline_state);
+
+                                        // Send result back
+                                        let response = match result {
+                                            Ok(msg) => format!("RESULT|ok|{}", msg),
+                                            Err(e) => format!("RESULT|error|{}", e),
+                                        };
+                                        if let Ok(mut send_stream) = connection.open_uni().await {
+                                            let _ = send_stream.write_all(response.as_bytes()).await;
+                                            let _ = send_stream.finish();
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                println!("Disconnected from central: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                    _ = health_check_interval.tick() => {
+                        // Log QUIC connection stats
+                        quic_metrics::log_stats(&connection, &config.node_name);
+
+                        // Check recorder health
+                        if let Some(ref mut rec) = recorder {
+                            if let Err(e) = rec.check_and_restart() {
+                                eprintln!("Recorder error: {}", e);
+                            }
+                            // Ensure disk space by deleting old recordings if needed
+                            if let Err(e) = ensure_disk_space(
+                                &rec.config().output_dir,
+                                rec.config().disk_reserve_percent,
+                                &rec.config().file_format,
+                            ) {
+                                eprintln!("WARNING: Could not ensure disk space: {}", e);
+                            }
+                        }
+                    }
+                    _ = heartbeat_interval.tick() => {
+                        // Check for ACK timeout first
+                        if conn_state.awaiting_ack {
+                            if let Some(sent_time) = conn_state.last_heartbeat_sent {
+                                let elapsed = sent_time.elapsed().as_secs();
+                                if elapsed > HEARTBEAT_TIMEOUT_SECS {
+                                    println!("[HEARTBEAT] Timeout - no ACK received in {}s", elapsed);
+                                    break;
+                                }
+                            }
+                            // Still waiting for ACK, don't send another heartbeat yet
+                            continue;
+                        }
+
+                        // Send new heartbeat
+                        let timestamp = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64;
+                        let heartbeat = format!("HEARTBEAT|{}", timestamp);
+
+                        match connection.open_uni().await {
+                            Ok(mut send_stream) => {
+                                if send_stream.write_all(heartbeat.as_bytes()).await.is_ok() {
+                                    let _ = send_stream.finish();
+                                    conn_state.last_heartbeat_sent = Some(Instant::now());
+                                    conn_state.awaiting_ack = true;
+                                }
+                            }
+                            Err(e) => {
+                                println!("[HEARTBEAT] Failed to send: {}", e);
+                                break;
+                            }
                         }
                     }
                 }
             }
+
+            // Disconnected - will reconnect
+            println!("[{}] Video stream ended, sent {} frames", config.node_name, frame_count);
+        } else if response.starts_with("DENIED") {
+            println!("Denied by central node: {}", response);
+            break 'reconnect;  // Exit on denial - don't retry
+        } else {
+            println!("Unexpected response: {}", response);
         }
 
-        // Cancel video sender when disconnected
-        video_handle.abort();
-    } else if response.starts_with("DENIED") {
-        println!("Denied by central node: {}", response);
-    } else {
-        println!("Unexpected response: {}", response);
-    }
+        // Wait before reconnecting
+        println!("Reconnecting in {} seconds...", RECONNECT_INTERVAL_SECS);
+        tokio::time::sleep(Duration::from_secs(RECONNECT_INTERVAL_SECS)).await;
+    } // end of 'reconnect loop
 
     // Stop recorder if running
     if let Some(ref mut rec) = recorder {
