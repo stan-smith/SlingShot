@@ -9,3 +9,4 @@ thiserror = "2"
 crc32fast = "1.4"
 tokio = { version = "1", features = ["fs", "io-util"] }
 quinn = "0.11"
+kaiju-encryption = { path = "../kaiju-encryption" }

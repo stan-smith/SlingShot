@@ -21,7 +21,15 @@ rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/quic-common/ 
 rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/quic-metrics/ khadas@khadas:~/quic-metrics/
 rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/quic-video/ khadas@khadas:~/quic-video/
 rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/recording-retrieval/ khadas@khadas:~/recording-retrieval/
+rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/kaiju-encryption/ khadas@khadas:~/kaiju-encryption/
+rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/config-manager/ khadas@khadas:~/config-manager/
 ```
+
+After syncing, build on khadas:
+```bash
+ssh khadas@khadas "source ~/.cargo/env && cd ~/remote && cargo build --release"
+```
+
 If you have any quesitons, ask me, I always prefer you to seek clarity rather than make rash decisions.
 When debugging, if something is not working, despite repeated attempts, let me know, and we will reassess it together.
 Additionally to point out, I always prefer you to create mini proof of concepts to prove that something works rather than modifying the main codebase. These mini POCs

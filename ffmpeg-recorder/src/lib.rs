@@ -9,6 +9,7 @@
 //! - Timestamp-based file naming (e.g., `2024-12-01_15-30-00.mp4`)
 //! - Auto-restart on ffmpeg crash with exponential backoff
 //! - Disk space monitoring with configurable reserve threshold
+//! - Optional encryption of completed segments (X25519 + AES-256-GCM)
 //!
 //! # Example
 //! ```ignore
@@ -36,6 +37,7 @@
 
 pub mod cleanup;
 pub mod config;
+pub mod encryptor;
 pub mod recorder;
 
 pub use cleanup::{
@@ -43,6 +45,7 @@ pub use cleanup::{
     get_available_bytes, get_disk_usage, get_total_bytes, has_disk_space, DiskError,
 };
 pub use config::{ConfigError, RecorderConfig};
+pub use encryptor::{EncryptorError, SegmentEncryptor, ENCRYPTED_EXT};
 pub use recorder::{Recorder, RecorderError};
 
 /// Check if ffmpeg is available on the system

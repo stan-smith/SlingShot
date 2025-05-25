@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use kaiju_encryption::X25519KeyPair;
 use rusqlite::{params, Connection};
 
 use crate::error::StoreError;
@@ -66,7 +67,9 @@ impl FingerprintStore {
                 node_name TEXT NOT NULL,
                 first_seen TEXT NOT NULL,
                 last_seen TEXT NOT NULL,
-                approved_by TEXT
+                approved_by TEXT,
+                x25519_secret TEXT,
+                x25519_public TEXT
             )",
             [],
         )?;
@@ -205,5 +208,69 @@ impl FingerprintStore {
         })?;
 
         nodes.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Generate and store an X25519 encryption keypair for a remote node.
+    /// If a keypair already exists for this fingerprint, returns the existing public key.
+    /// Returns the hex-encoded public key.
+    pub fn generate_encryption_key(&self, fingerprint: &str) -> Result<String, StoreError> {
+        // Check if key already exists
+        if let Some(pubkey) = self.get_encryption_pubkey(fingerprint)? {
+            return Ok(pubkey);
+        }
+
+        // Generate new keypair
+        let keypair = X25519KeyPair::generate();
+        let secret_hex = keypair.secret_hex();
+        let public_hex = keypair.public_hex();
+
+        // Store in database
+        self.conn.execute(
+            "UPDATE approved_nodes SET x25519_secret = ?, x25519_public = ? WHERE fingerprint = ?",
+            params![secret_hex, public_hex, fingerprint],
+        )?;
+
+        Ok(public_hex)
+    }
+
+    /// Get the encryption keypair (secret and public) for a remote node.
+    /// Returns (secret_hex, public_hex) if exists.
+    /// Used by central when decrypting retrieved recordings.
+    pub fn get_encryption_keypair(
+        &self,
+        fingerprint: &str,
+    ) -> Result<Option<(String, String)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT x25519_secret, x25519_public FROM approved_nodes WHERE fingerprint = ?",
+        )?;
+
+        let result = stmt.query_row([fingerprint], |row| {
+            let secret: Option<String> = row.get(0)?;
+            let public: Option<String> = row.get(1)?;
+            Ok((secret, public))
+        });
+
+        match result {
+            Ok((Some(secret), Some(public))) => Ok(Some((secret, public))),
+            Ok(_) => Ok(None), // One or both keys missing
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Get only the public encryption key for a remote node.
+    /// Used when re-sending pubkey on reconnection.
+    pub fn get_encryption_pubkey(&self, fingerprint: &str) -> Result<Option<String>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT x25519_public FROM approved_nodes WHERE fingerprint = ?")?;
+
+        let result = stmt.query_row([fingerprint], |row| row.get::<_, Option<String>>(0));
+
+        match result {
+            Ok(pubkey) => Ok(pubkey),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 }

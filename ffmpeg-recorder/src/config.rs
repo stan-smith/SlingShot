@@ -17,6 +17,10 @@ pub struct RecorderConfig {
     /// File format: "mp4" or "mkv" (default: "mp4")
     #[serde(default = "default_file_format")]
     pub file_format: String,
+    /// Optional encryption public key (hex-encoded X25519, 64 chars)
+    /// When set, completed segments are encrypted and original deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_pubkey: Option<String>,
 }
 
 fn default_segment_duration() -> u32 {
@@ -40,7 +44,19 @@ impl RecorderConfig {
             segment_duration: default_segment_duration(),
             disk_reserve_percent: default_disk_reserve_percent(),
             file_format: default_file_format(),
+            encryption_pubkey: None,
         }
+    }
+
+    /// Set the encryption public key (builder pattern)
+    pub fn with_encryption(mut self, pubkey_hex: String) -> Self {
+        self.encryption_pubkey = Some(pubkey_hex);
+        self
+    }
+
+    /// Check if encryption is enabled
+    pub fn encryption_enabled(&self) -> bool {
+        self.encryption_pubkey.is_some()
     }
 
     /// Load config from a TOML file

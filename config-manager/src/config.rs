@@ -127,6 +127,9 @@ pub struct RemoteConfig {
     pub source: SourceConfig,
     pub recording: RecordingConfig,
     pub storage: StorageConfig,
+    /// Enable encryption for recordings (requires key from central)
+    #[serde(default)]
+    pub encryption_enabled: bool,
 }
 
 impl RemoteConfig {

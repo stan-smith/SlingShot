@@ -53,18 +53,19 @@ pub struct FileHeader {
     pub file_size: u64,   // Size in bytes
     pub chunk_size: u32,  // Size of each chunk
     pub total_chunks: u32,
-    pub crc32: u32, // CRC32 of entire file
+    pub crc32: u32,       // CRC32 of entire file
     pub filename: String,
+    pub encrypted: bool,  // True if file is encrypted (.enc)
 }
 
 impl FileHeader {
     /// Encode for wire transmission
     /// Format: [magic:1][type:1][request_id:4][file_index:4][total_files:4]
     ///         [file_size:8][chunk_size:4][total_chunks:4][crc32:4]
-    ///         [filename_len:2][filename:N]
+    ///         [encrypted:1][filename_len:2][filename:N]
     pub fn encode(&self) -> Vec<u8> {
         let filename_bytes = self.filename.as_bytes();
-        let mut buf = Vec::with_capacity(36 + filename_bytes.len());
+        let mut buf = Vec::with_capacity(37 + filename_bytes.len());
         buf.push(FILE_TRANSFER_MAGIC);
         buf.push(FileMessageType::FileHeader as u8);
         buf.extend_from_slice(&self.request_id.to_be_bytes());
@@ -74,17 +75,19 @@ impl FileHeader {
         buf.extend_from_slice(&self.chunk_size.to_be_bytes());
         buf.extend_from_slice(&self.total_chunks.to_be_bytes());
         buf.extend_from_slice(&self.crc32.to_be_bytes());
+        buf.push(if self.encrypted { 1 } else { 0 });
         buf.extend_from_slice(&(filename_bytes.len() as u16).to_be_bytes());
         buf.extend_from_slice(filename_bytes);
         buf
     }
 
     pub fn decode(data: &[u8]) -> Result<Self, RetrievalError> {
-        if data.len() < 36 || data[0] != FILE_TRANSFER_MAGIC {
+        if data.len() < 37 || data[0] != FILE_TRANSFER_MAGIC {
             return Err(RetrievalError::ProtocolError("Invalid FileHeader".into()));
         }
-        let filename_len = u16::from_be_bytes(data[34..36].try_into().unwrap()) as usize;
-        if data.len() < 36 + filename_len {
+        let encrypted = data[34] != 0;
+        let filename_len = u16::from_be_bytes(data[35..37].try_into().unwrap()) as usize;
+        if data.len() < 37 + filename_len {
             return Err(RetrievalError::ProtocolError(
                 "FileHeader truncated".into(),
             ));
@@ -97,7 +100,8 @@ impl FileHeader {
             chunk_size: u32::from_be_bytes(data[22..26].try_into().unwrap()),
             total_chunks: u32::from_be_bytes(data[26..30].try_into().unwrap()),
             crc32: u32::from_be_bytes(data[30..34].try_into().unwrap()),
-            filename: String::from_utf8_lossy(&data[36..36 + filename_len]).to_string(),
+            encrypted,
+            filename: String::from_utf8_lossy(&data[37..37 + filename_len]).to_string(),
         })
     }
 }
@@ -312,6 +316,7 @@ mod tests {
             total_chunks: 2,
             crc32: 0xDEADBEEF,
             filename: "2024-12-01_15-30-00.mp4".to_string(),
+            encrypted: false,
         };
 
         let encoded = header.encode();
@@ -323,6 +328,29 @@ mod tests {
         assert_eq!(decoded.file_size, 1024 * 1024);
         assert_eq!(decoded.crc32, 0xDEADBEEF);
         assert_eq!(decoded.filename, "2024-12-01_15-30-00.mp4");
+        assert!(!decoded.encrypted);
+    }
+
+    #[test]
+    fn test_file_header_encrypted_roundtrip() {
+        let header = FileHeader {
+            request_id: 99,
+            file_index: 1,
+            total_files: 5,
+            file_size: 2048 * 1024,
+            chunk_size: 512 * 1024,
+            total_chunks: 4,
+            crc32: 0xCAFEBABE,
+            filename: "2024-12-01_15-30-00.mp4.enc".to_string(),
+            encrypted: true,
+        };
+
+        let encoded = header.encode();
+        let decoded = FileHeader::decode(&encoded).unwrap();
+
+        assert_eq!(decoded.request_id, 99);
+        assert_eq!(decoded.filename, "2024-12-01_15-30-00.mp4.enc");
+        assert!(decoded.encrypted);
     }
 
     #[test]

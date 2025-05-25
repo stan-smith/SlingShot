@@ -82,6 +82,9 @@ impl FileTransferSender {
             .to_string_lossy()
             .to_string();
 
+        // Detect if file is encrypted (has .enc extension)
+        let encrypted = filename.ends_with(".enc");
+
         // Send file header
         let header = FileHeader {
             request_id,
@@ -92,6 +95,7 @@ impl FileTransferSender {
             total_chunks,
             crc32: file_crc,
             filename: filename.clone(),
+            encrypted,
         };
 
         println!(
@@ -215,6 +219,8 @@ struct ActiveTransfer {
 pub struct FileTransferReceiver {
     output_dir: PathBuf,
     active_transfers: HashMap<(u32, u32), ActiveTransfer>, // (request_id, file_index)
+    /// Secret key for decrypting encrypted recordings (hex-encoded)
+    decryption_key: Option<String>,
 }
 
 /// Progress information for a file transfer
@@ -244,7 +250,22 @@ impl FileTransferReceiver {
         Self {
             output_dir,
             active_transfers: HashMap::new(),
+            decryption_key: None,
         }
+    }
+
+    /// Create a receiver with a decryption key for encrypted recordings
+    pub fn with_decryption_key(output_dir: PathBuf, secret_key_hex: String) -> Self {
+        Self {
+            output_dir,
+            active_transfers: HashMap::new(),
+            decryption_key: Some(secret_key_hex),
+        }
+    }
+
+    /// Set the decryption key (can be called after construction)
+    pub fn set_decryption_key(&mut self, secret_key_hex: String) {
+        self.decryption_key = Some(secret_key_hex);
     }
 
     /// Start receiving a new file
@@ -305,6 +326,7 @@ impl FileTransferReceiver {
     }
 
     /// Complete a file transfer and verify CRC
+    /// If the file is encrypted and we have a decryption key, decrypt it.
     pub async fn complete_file(
         &mut self,
         request_id: u32,
@@ -331,7 +353,50 @@ impl FileTransferReceiver {
             });
         }
 
+        // If file is encrypted, decrypt it
+        if transfer.header.encrypted {
+            return self.decrypt_file(&transfer.output_path).await;
+        }
+
         Ok(transfer.output_path)
+    }
+
+    /// Decrypt an encrypted file and return the path to the decrypted file
+    async fn decrypt_file(&self, encrypted_path: &Path) -> Result<PathBuf, RetrievalError> {
+        let secret_key = self
+            .decryption_key
+            .as_ref()
+            .ok_or(RetrievalError::NoDecryptionKey)?;
+
+        // Read encrypted content
+        let ciphertext = tokio::fs::read(encrypted_path).await?;
+
+        // Decrypt
+        let plaintext = kaiju_encryption::open_with_hex_key(&ciphertext, secret_key)?;
+
+        // Compute decrypted filename by stripping .enc extension
+        let encrypted_name = encrypted_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let decrypted_name = encrypted_name.strip_suffix(".enc").unwrap_or(encrypted_name);
+        let decrypted_path = encrypted_path.with_file_name(decrypted_name);
+
+        // Write decrypted file
+        tokio::fs::write(&decrypted_path, &plaintext).await?;
+
+        // Delete encrypted file
+        tokio::fs::remove_file(encrypted_path).await?;
+
+        println!(
+            "[DECRYPT] {} ({}) -> {} ({})",
+            encrypted_name,
+            crate::format_size(ciphertext.len() as u64),
+            decrypted_name,
+            crate::format_size(plaintext.len() as u64)
+        );
+
+        Ok(decrypted_path)
     }
 
     /// Get progress for a specific file transfer

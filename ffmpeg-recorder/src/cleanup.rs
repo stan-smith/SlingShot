@@ -1,17 +1,29 @@
+use crate::encryptor::ENCRYPTED_EXT;
 use std::path::{Path, PathBuf};
 
+/// Check if a path is a recording file (either plain or encrypted)
+fn is_recording_file(path: &Path, file_format: &str) -> bool {
+    let path_str = path.to_string_lossy();
+    // Check for encrypted: filename.mp4.enc
+    let encrypted_suffix = format!(".{}.{}", file_format, ENCRYPTED_EXT);
+    if path_str.ends_with(&encrypted_suffix) {
+        return true;
+    }
+    // Check for plain: filename.mp4
+    path.extension()
+        .map(|ext| ext == file_format)
+        .unwrap_or(false)
+}
+
 /// Delete the oldest recording file in the given directory
+/// Handles both plain recordings (.mp4) and encrypted ones (.mp4.enc)
 /// Returns the path and size of the deleted file, or None if no files found
 pub fn delete_oldest_recording(dir: &Path, file_format: &str) -> Result<Option<(PathBuf, u64)>, DiskError> {
-    // Find all recording files
+    // Find all recording files (both plain and encrypted)
     let mut files: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| DiskError::IoError(e.to_string()))?
         .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry.path().extension()
-                .map(|ext| ext == file_format)
-                .unwrap_or(false)
-        })
+        .filter(|entry| is_recording_file(&entry.path(), file_format))
         .filter_map(|entry| {
             let metadata = entry.metadata().ok()?;
             let modified = metadata.modified().ok()?;

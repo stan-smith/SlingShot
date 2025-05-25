@@ -7,7 +7,7 @@ use config_manager::{
     StorageConfig as CfgStorageConfig,
 };
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use ffmpeg_recorder::{ensure_disk_space, Recorder, RecorderConfig};
+use ffmpeg_recorder::{ensure_disk_space, Recorder, RecorderConfig, SegmentEncryptor};
 use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
 use onvif_client::OnvifClient;
@@ -318,6 +318,22 @@ async fn async_main(mut config: RemoteConfig, save_config: bool) -> Result<()> {
         }
     };
 
+    // Load encryption pubkey if available (for encrypting recordings)
+    let encryption_pubkey: Option<String> = if config.encryption_enabled {
+        match EncryptionConfig::load() {
+            Ok(enc) => {
+                println!("Encryption key loaded for recordings");
+                Some(enc.x25519_pubkey)
+            }
+            Err(_) => {
+                println!("Encryption enabled but no key yet (will get on approval)");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Ask about recording if not already configured
     let recording_config: Option<RecorderConfig> = if config.recording.enabled {
         // Recording already enabled in config
@@ -328,6 +344,7 @@ async fn async_main(mut config: RemoteConfig, save_config: bool) -> Result<()> {
                 segment_duration: 30,
                 disk_reserve_percent: config.recording.disk_reserve_percent,
                 file_format: "mp4".to_string(),
+                encryption_pubkey: encryption_pubkey.clone(),
             })
         } else {
             println!("Recording enabled but storage not available.");
@@ -363,10 +380,32 @@ async fn async_main(mut config: RemoteConfig, save_config: bool) -> Result<()> {
                     segment_duration: 30,
                     disk_reserve_percent: reserve_pct,
                     file_format: "mp4".to_string(),
+                    encryption_pubkey: encryption_pubkey.clone(),
                 })
             } else {
                 None
             }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Create segment encryptor if encryption is enabled and we have a key
+    let mut segment_encryptor: Option<SegmentEncryptor> = if let Some(ref rec_config) = recording_config {
+        if let Some(ref pubkey) = rec_config.encryption_pubkey {
+            let mut enc = SegmentEncryptor::new(
+                rec_config.output_dir.clone(),
+                rec_config.file_format.clone(),
+                pubkey.clone(),
+            );
+            // Scan existing files so we don't re-encrypt them
+            if let Err(e) = enc.scan_existing() {
+                eprintln!("Warning: Could not scan existing recordings: {}", e);
+            }
+            println!("Recording encryption enabled");
+            Some(enc)
         } else {
             None
         }
@@ -867,6 +906,18 @@ async fn async_main(mut config: RemoteConfig, save_config: bool) -> Result<()> {
                             if let Err(e) = rec.check_and_restart() {
                                 eprintln!("Recorder error: {}", e);
                             }
+                            // Encrypt completed segments if encryption is enabled
+                            if let Some(ref mut enc) = segment_encryptor {
+                                match enc.process_completed() {
+                                    Ok(count) if count > 0 => {
+                                        // Encrypted segments logged by encryptor
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Encryption error: {}", e);
+                                    }
+                                    _ => {}
+                                }
+                            }
                             // Ensure disk space by deleting old recordings if needed
                             if let Err(e) = ensure_disk_space(
                                 &rec.config().output_dir,
@@ -934,6 +985,16 @@ async fn async_main(mut config: RemoteConfig, save_config: bool) -> Result<()> {
         println!("Stopping recorder...");
         if let Err(e) = rec.stop() {
             eprintln!("Failed to stop recorder: {}", e);
+        }
+    }
+
+    // Encrypt any remaining segments on shutdown
+    if let Some(ref mut enc) = segment_encryptor {
+        println!("Finalizing segment encryption...");
+        match enc.finalize() {
+            Ok(count) if count > 0 => println!("Encrypted {} remaining segment(s)", count),
+            Err(e) => eprintln!("Failed to finalize encryption: {}", e),
+            _ => {}
         }
     }
 

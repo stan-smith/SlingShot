@@ -1,0 +1,14 @@
+[package]
+name = "kaiju-encryption"
+version = "0.1.0"
+edition = "2021"
+description = "Encryption utilities for kaiju - X25519 key management and hybrid encryption"
+
+[dependencies]
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
+thiserror = "2"

@@ -1,7 +1,8 @@
-//! Test Remote - Fake ONVIF Camera with Test Card
+//! Test Remote - Fake ONVIF Camera with Test Card or File Source
 //!
 //! Simulates an ONVIF camera for testing:
-//! - Generates test pattern video via GStreamer
+//! - Generates test pattern video via GStreamer (default)
+//! - Or plays a video file on loop (with --file option)
 //! - Streams video over QUIC (stream-per-frame) to central
 //! - ONVIF HTTP server for PTZ commands (port 8082)
 
@@ -20,6 +21,7 @@ use onvif_server::{extract_position, extract_soap_action, extract_velocity, get_
 use quinn::Endpoint;
 use std::env;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -53,11 +55,10 @@ impl Default for StreamParams {
     }
 }
 
-/// Source framerate for test pattern (fixed)
-const SOURCE_FRAMERATE: i32 = 30;
+/// Default source framerate for test pattern
+const DEFAULT_SOURCE_FRAMERATE: i32 = 30;
 
 /// Shared state for the test camera
-#[derive(Default)]
 struct TestCameraState {
     position: PtzPosition,
     moving: bool,
@@ -67,20 +68,49 @@ struct TestCameraState {
     encoder: Option<gstreamer::Element>,
     videorate: Option<gstreamer::Element>,
     params: StreamParams,
+    /// Detected source framerate (for fps command validation)
+    source_framerate: i32,
+}
+
+impl Default for TestCameraState {
+    fn default() -> Self {
+        Self {
+            position: PtzPosition::default(),
+            moving: false,
+            velocity: PtzPosition::default(),
+            capsfilter: None,
+            encoder: None,
+            videorate: None,
+            params: StreamParams::default(),
+            source_framerate: DEFAULT_SOURCE_FRAMERATE,
+        }
+    }
 }
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
+    // Parse arguments: test_remote [name] [central:port] [--file path]
     let node_name = args.get(1).map(|s| s.as_str()).unwrap_or("test-cam");
     let central_addr = args.get(2).map(|s| s.as_str());
-    let onvif_port = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(8082u16);
+
+    // Parse --file option (can appear anywhere after positional args)
+    let file_source: Option<PathBuf> = args.iter()
+        .position(|a| a == "--file")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from);
+
+    // ONVIF port defaults to 8082
+    let onvif_port = args.get(3)
+        .filter(|s| !s.starts_with("--"))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8082u16);
 
     println!("==========================================");
     println!("TEST REMOTE - Fake ONVIF Camera (QUIC)");
     println!("==========================================");
     println!();
-    println!("Usage: test_remote [name] [central:port] [onvif_port]");
+    println!("Usage: test_remote [name] [central:port] [--file path]");
     println!();
     println!("Configuration:");
     println!("  Node name:   {}", node_name);
@@ -89,6 +119,11 @@ fn main() -> Result<()> {
         println!("  Central:     {}", addr);
     } else {
         println!("  Central:     (required for QUIC streaming)");
+    }
+    if let Some(ref path) = file_source {
+        println!("  File source: {}", path.display());
+    } else {
+        println!("  Source:      SMPTE test pattern");
     }
     println!();
 
@@ -103,6 +138,7 @@ fn main() -> Result<()> {
             node_name.to_string(),
             central_addr.map(|s| s.to_string()),
             onvif_port,
+            file_source,
         ))
 }
 
@@ -110,6 +146,7 @@ async fn async_main(
     node_name: String,
     central_addr: Option<String>,
     onvif_port: u16,
+    file_source: Option<PathBuf>,
 ) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -118,7 +155,7 @@ async fn async_main(
         Some(addr) => addr,
         None => {
             eprintln!("Error: central address required for QUIC streaming");
-            eprintln!("Usage: test_remote [name] [central:port] [onvif_port]");
+            eprintln!("Usage: test_remote [name] [central:port] [--file path]");
             return Ok(());
         }
     };
@@ -130,19 +167,11 @@ async fn async_main(
     let (frame_tx, mut frame_rx) = mpsc::channel::<quic_video::VideoFrame>(30);
     let seq = Arc::new(AtomicU32::new(0));
 
-    // Build GStreamer pipeline: videotestsrc -> encode -> appsink
+    // Build GStreamer pipeline
     let pipe = gstreamer::Pipeline::new();
     let params = camera_state.lock().unwrap().params.clone();
 
-    let src = gstreamer::ElementFactory::make("videotestsrc")
-        .property("is-live", true)
-        .property_from_str("pattern", "smpte")
-        .build()?;
-    let srccaps = gstreamer::ElementFactory::make("capsfilter")
-        .property("caps", gstreamer::Caps::builder("video/x-raw")
-            .field("width", 1920i32).field("height", 1080i32)
-            .field("framerate", gstreamer::Fraction::new(30, 1)).build())
-        .build()?;
+    // Common elements for both source types
     let convert = gstreamer::ElementFactory::make("videoconvert").build()?;
     let scale = gstreamer::ElementFactory::make("videoscale").build()?;
     // Configure videorate to only drop frames, never duplicate (prevents buffering)
@@ -169,15 +198,66 @@ async fn async_main(
 
     let parser = gstreamer::ElementFactory::make("h264parse").build()?;
     let sink = gstreamer::ElementFactory::make("appsink").build()?.dynamic_cast::<AppSink>().unwrap();
-    // Configure appsink - for test pattern we can drop frames if needed
-    sink.set_sync(false);
-    sink.set_max_buffers(30);  // ~1 second buffer at 30fps
-    sink.set_drop(false);      // Match real remote behavior
+    // For file playback: sync=true to respect timestamps and play at correct speed
+    // For live sources: sync=false to minimize latency
+    sink.set_sync(file_source.is_some());
+    sink.set_max_buffers(30);
+    sink.set_drop(false);
     sink.set_caps(Some(&gstreamer::Caps::builder("video/x-h264")
         .field("stream-format", "byte-stream").field("alignment", "au").build()));
 
-    pipe.add_many([&src, &srccaps, &convert, &scale, &rate, &capsfilter, &encoder, &parser, sink.upcast_ref()])?;
-    gstreamer::Element::link_many([&src, &srccaps, &convert, &scale, &rate, &capsfilter, &encoder, &parser, sink.upcast_ref()])?;
+    // Build source-specific pipeline
+    if let Some(ref file_path) = file_source {
+        // File source pipeline: uridecodebin -> convert -> scale -> rate -> ...
+        let uri = format!("file://{}", file_path.canonicalize()?.display());
+        let src = gstreamer::ElementFactory::make("uridecodebin")
+            .property("uri", &uri)
+            .build()?;
+
+        pipe.add_many([&src, &convert, &scale, &rate, &capsfilter, &encoder, &parser, sink.upcast_ref()])?;
+        // Link everything after convert (uridecodebin has dynamic pads)
+        gstreamer::Element::link_many([&convert, &scale, &rate, &capsfilter, &encoder, &parser, sink.upcast_ref()])?;
+
+        // Handle dynamic pad from uridecodebin
+        let convert_weak = convert.downgrade();
+        src.connect_pad_added(move |_src, src_pad| {
+            let Some(convert) = convert_weak.upgrade() else { return };
+
+            // Only link video pads
+            let caps = src_pad.current_caps().or_else(|| Some(src_pad.query_caps(None)));
+            if let Some(caps) = caps {
+                if let Some(structure) = caps.structure(0) {
+                    if !structure.name().starts_with("video/") {
+                        return; // Skip audio pads
+                    }
+                }
+            }
+
+            let sink_pad = convert.static_pad("sink").unwrap();
+            if sink_pad.is_linked() {
+                return;
+            }
+            if let Err(e) = src_pad.link(&sink_pad) {
+                eprintln!("Failed to link uridecodebin pad: {:?}", e);
+            } else {
+                println!("Linked video pad from file");
+            }
+        });
+    } else {
+        // Test pattern pipeline: videotestsrc -> srccaps -> convert -> scale -> rate -> ...
+        let src = gstreamer::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .property_from_str("pattern", "smpte")
+            .build()?;
+        let srccaps = gstreamer::ElementFactory::make("capsfilter")
+            .property("caps", gstreamer::Caps::builder("video/x-raw")
+                .field("width", 1920i32).field("height", 1080i32)
+                .field("framerate", gstreamer::Fraction::new(30, 1)).build())
+            .build()?;
+
+        pipe.add_many([&src, &srccaps, &convert, &scale, &rate, &capsfilter, &encoder, &parser, sink.upcast_ref()])?;
+        gstreamer::Element::link_many([&src, &srccaps, &convert, &scale, &rate, &capsfilter, &encoder, &parser, sink.upcast_ref()])?;
+    }
 
     // Store element references for dynamic control
     {
@@ -201,9 +281,11 @@ async fn async_main(
             Ok(gstreamer::FlowSuccess::Ok)
         }).build());
 
-    // Bus message handler
+    // Bus message handler (with EOS handling for file loop)
     let bus = pipe.bus().unwrap();
     let node_name_bus = node_name.clone();
+    let pipe_weak = pipe.downgrade();
+    let is_file_source = file_source.is_some();
     std::thread::spawn(move || {
         for msg in bus.iter_timed(gstreamer::ClockTime::NONE) {
             match msg.view() {
@@ -215,13 +297,26 @@ async fn async_main(
                         println!("[{}] Pipeline: {:?} -> {:?}", node_name_bus, s.old(), s.current());
                     }
                 }
+                gstreamer::MessageView::Eos(_) => {
+                    // Loop file playback by seeking back to start
+                    if is_file_source {
+                        if let Some(pipe) = pipe_weak.upgrade() {
+                            println!("[{}] End of file, looping...", node_name_bus);
+                            let _ = pipe.seek_simple(
+                                gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::KEY_UNIT,
+                                gstreamer::ClockTime::ZERO,
+                            );
+                        }
+                    }
+                }
                 _ => {}
             }
         }
     });
 
     pipe.set_state(gstreamer::State::Playing)?;
-    println!("GStreamer pipeline started (SMPTE test pattern)");
+    let source_desc = if file_source.is_some() { "file source (looping)" } else { "SMPTE test pattern" };
+    println!("GStreamer pipeline started ({})", source_desc);
     println!();
 
     // Get local IP
@@ -561,10 +656,10 @@ fn handle_command(cmd: &str, state: &Arc<Mutex<TestCameraState>>) -> Result<Stri
             }
 
             // Cannot increase above source framerate
-            if fps > SOURCE_FRAMERATE {
+            if fps > camera.source_framerate {
                 return Err(format!(
                     "Cannot exceed source framerate of {} fps (can only reduce)",
-                    SOURCE_FRAMERATE
+                    camera.source_framerate
                 ));
             }
 
@@ -582,7 +677,7 @@ fn handle_command(cmd: &str, state: &Arc<Mutex<TestCameraState>>) -> Result<Stri
         "params" | "stream" => {
             let fps_str = match camera.params.framerate {
                 Some(fps) => format!("{}", fps),
-                None => format!("{} (source)", SOURCE_FRAMERATE),
+                None => format!("{} (source)", camera.source_framerate),
             };
             Ok(format!(
                 "Stream: {}x{} @ {} fps, {} kbps",

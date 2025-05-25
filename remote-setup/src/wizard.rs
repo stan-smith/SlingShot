@@ -70,6 +70,12 @@ pub fn run_wizard() -> Result<()> {
     let recording = configure_recording(&existing)?;
     let storage = configure_storage(&existing)?;
 
+    println!();
+    println!("--- Security ---");
+    println!();
+
+    let encryption_enabled = configure_encryption(&existing)?;
+
     // Build config
     let config = RemoteConfig {
         node_name: node_name.clone(),
@@ -77,6 +83,7 @@ pub fn run_wizard() -> Result<()> {
         source,
         recording,
         storage,
+        encryption_enabled,
     };
 
     // Show summary
@@ -249,6 +256,21 @@ fn configure_storage(existing: &Option<RemoteConfig>) -> Result<StorageConfig> {
     ))
 }
 
+fn configure_encryption(existing: &Option<RemoteConfig>) -> Result<bool> {
+    let existing_enabled = existing.as_ref().map(|c| c.encryption_enabled).unwrap_or(false);
+
+    println!("Encryption protects recordings with a key from the central server.");
+    println!("Only the central server can decrypt the footage.");
+    println!();
+
+    let enabled = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("Enable encryption for recordings?")
+        .default(existing_enabled)
+        .interact()?;
+
+    Ok(enabled)
+}
+
 fn print_config_summary(config: &RemoteConfig) {
     println!("Node name:       {}", config.node_name);
     println!("Central address: {}", config.central_address);
@@ -278,6 +300,14 @@ fn print_config_summary(config: &RemoteConfig) {
         }
     );
     println!("Storage:         {}", config.storage.mountpoint.display());
+    println!(
+        "Encryption:      {}",
+        if config.encryption_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
 }
 
 fn mask_rtsp_password(url: &str) -> String {

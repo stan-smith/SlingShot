@@ -1,6 +1,7 @@
 //! Error types for recording retrieval
 
 use chrono::{DateTime, Local};
+use kaiju_encryption::EncryptionError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RetrievalError {
@@ -49,6 +50,12 @@ pub enum RetrievalError {
 
     #[error("Transfer cancelled")]
     Cancelled,
+
+    #[error("Decryption failed: {0}")]
+    DecryptionFailed(String),
+
+    #[error("Encrypted file received but no decryption key available")]
+    NoDecryptionKey,
 }
 
 impl From<std::io::Error> for RetrievalError {
@@ -72,5 +79,11 @@ impl From<quinn::WriteError> for RetrievalError {
 impl From<quinn::ClosedStream> for RetrievalError {
     fn from(e: quinn::ClosedStream) -> Self {
         RetrievalError::QuicError(e.to_string())
+    }
+}
+
+impl From<EncryptionError> for RetrievalError {
+    fn from(e: EncryptionError) -> Self {
+        RetrievalError::DecryptionFailed(e.to_string())
     }
 }

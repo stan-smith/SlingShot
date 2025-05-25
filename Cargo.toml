@@ -15,4 +15,5 @@ members = [
     "remote-setup",
     "central-setup",
     "fingerprint-store",
+    "kaiju-encryption",
 ]

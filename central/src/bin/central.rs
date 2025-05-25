@@ -642,7 +642,31 @@ async fn handle_connection(
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join("kaiju")
             .join(&node_name);
-        let mut file_receiver = FileTransferReceiver::new(output_dir.clone());
+
+        // Look up decryption key for this node
+        let decryption_key = {
+            let store = fingerprint_store.lock().await;
+            match store.get_encryption_keypair(&fingerprint) {
+                Ok(Some((secret, _public))) => {
+                    println!("[{}] Decryption key loaded", node_name);
+                    Some(secret)
+                }
+                Ok(None) => {
+                    println!("[{}] No encryption key found (unencrypted transfers only)", node_name);
+                    None
+                }
+                Err(e) => {
+                    eprintln!("[{}] Error loading encryption key: {}", node_name, e);
+                    None
+                }
+            }
+        };
+
+        let mut file_receiver = if let Some(key) = decryption_key {
+            FileTransferReceiver::with_decryption_key(output_dir.clone(), key)
+        } else {
+            FileTransferReceiver::new(output_dir.clone())
+        };
 
         // Main loop: handle video frames, commands, and stats
         let mut stats_interval = tokio::time::interval(std::time::Duration::from_secs(5));

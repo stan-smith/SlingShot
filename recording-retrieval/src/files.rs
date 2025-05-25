@@ -20,16 +20,22 @@ pub struct RecordingFile {
     pub size_bytes: u64,
 }
 
-/// Parse filename like "2024-12-01_15-30-00.mp4" to DateTime
+/// Parse filename like "2024-12-01_15-30-00.mp4" or "2024-12-01_15-30-00.mp4.enc" to DateTime
 fn parse_filename_timestamp(filename: &str) -> Option<DateTime<Local>> {
-    // Extract stem (remove extension)
+    // Extract stem (remove extension, including .enc for encrypted files)
     let stem = filename
-        .strip_suffix(".mp4")
-        .or_else(|| filename.strip_suffix(".mkv"))?;
+        .strip_suffix(".mp4.enc")
+        .or_else(|| filename.strip_suffix(".mp4"))?;
 
     // Parse "YYYY-MM-DD_HH-MM-SS"
     let naive = NaiveDateTime::parse_from_str(stem, "%Y-%m-%d_%H-%M-%S").ok()?;
     Local.from_local_datetime(&naive).single()
+}
+
+/// Check if a file is a recording file (plain or encrypted)
+fn is_recording_file(path: &Path) -> bool {
+    let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+    filename.ends_with(".mp4") || filename.ends_with(".mp4.enc")
 }
 
 /// Find all recordings that overlap the given time range ("round up" logic)
@@ -52,9 +58,8 @@ pub fn find_recordings_in_range(
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
 
-        // Only process .mp4 and .mkv files
-        let ext = path.extension().and_then(|e| e.to_str());
-        if ext != Some("mp4") && ext != Some("mkv") {
+        // Only process recording files (.mp4, .mkv, or encrypted .enc versions)
+        if !is_recording_file(&path) {
             continue;
         }
 
@@ -106,6 +111,7 @@ pub fn total_size(recordings: &[RecordingFile]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Datelike, Timelike};
 
     #[test]
     fn test_parse_filename() {
@@ -119,9 +125,19 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_filename_mkv() {
-        let dt = parse_filename_timestamp("2024-12-01_15-30-00.mkv").unwrap();
+    fn test_parse_filename_encrypted() {
+        let dt = parse_filename_timestamp("2024-12-01_15-30-00.mp4.enc").unwrap();
         assert_eq!(dt.hour(), 15);
+        assert_eq!(dt.minute(), 30);
+    }
+
+    #[test]
+    fn test_is_recording_file() {
+        use std::path::PathBuf;
+        assert!(is_recording_file(&PathBuf::from("test.mp4")));
+        assert!(is_recording_file(&PathBuf::from("test.mp4.enc")));
+        assert!(!is_recording_file(&PathBuf::from("test.txt")));
+        assert!(!is_recording_file(&PathBuf::from("test.enc"))); // bare .enc is not a recording
     }
 
     #[test]
