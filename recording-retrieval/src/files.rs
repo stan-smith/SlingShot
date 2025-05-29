@@ -72,6 +72,12 @@ pub fn find_recordings_in_range(
         // Estimate end time (start + segment duration)
         let end_time = start_time + Duration::seconds(segment_duration_secs);
 
+        // Skip incomplete recordings (still being written by ffmpeg)
+        let now = Local::now();
+        if end_time > now {
+            continue;
+        }
+
         // Check overlap: recording overlaps range if
         // recording_start < range_end AND recording_end > range_start
         if start_time < range.to && end_time > range.from {
