@@ -51,6 +51,10 @@ struct Cli {
     #[arg(long)]
     no_save: bool,
 
+    /// Show verbose metrics (QUIC stats, frame counts, bitrate)
+    #[arg(long)]
+    debug: bool,
+
     #[command(subcommand)]
     source: Option<Source>,
 }
@@ -133,12 +137,13 @@ fn main() -> Result<()> {
 
     // Load or build configuration
     let (config, save_config) = load_or_build_config(&cli)?;
+    let debug = cli.debug;
 
     // Run async runtime
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(async_main(config, save_config && !cli.no_save))
+        .block_on(async_main(config, save_config && !cli.no_save, debug))
 }
 
 /// Load existing config or build from CLI args
@@ -196,12 +201,15 @@ fn cli_source_to_config(source: &Source) -> SourceConfig {
     }
 }
 
-async fn async_main(mut config: RemoteConfig, save_config: bool) -> Result<()> {
+async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     println!("==========================================");
     println!("RTSP REMOTE NODE: {}", config.node_name);
     println!("==========================================");
+    if debug {
+        println!("Debug mode enabled (verbose metrics)");
+    }
     println!();
 
     // Setup storage for recordings using config
@@ -814,8 +822,8 @@ async fn async_main(mut config: RemoteConfig, save_config: bool) -> Result<()> {
                         frame_count += 1;
                         bytes_sent += frame_size as u64;
 
-                        // Print stats every 30 frames (about once per second)
-                        if frame_count % 30 == 0 {
+                        // Print stats every 30 frames (about once per second) - debug only
+                        if debug && frame_count % 30 == 0 {
                             let now = Instant::now();
                             let interval_secs = now.duration_since(last_report_time).as_secs_f64();
                             let interval_bytes = bytes_sent - last_report_bytes;
@@ -898,8 +906,10 @@ async fn async_main(mut config: RemoteConfig, save_config: bool) -> Result<()> {
                         }
                     }
                     _ = health_check_interval.tick() => {
-                        // Log QUIC connection stats
-                        quic_metrics::log_stats(&connection, &config.node_name);
+                        // Log QUIC connection stats (debug only)
+                        if debug {
+                            quic_metrics::log_stats(&connection, &config.node_name);
+                        }
 
                         // Check recorder health
                         if let Some(ref mut rec) = recorder {

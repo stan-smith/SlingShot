@@ -47,6 +47,7 @@ async fn async_main() -> Result<()> {
     // Parse CLI arguments
     let args: Vec<String> = env::args().collect();
     let headless = args.iter().any(|a| a == "--headless");
+    let debug = args.iter().any(|a| a == "--debug");
 
     // Load configuration (require config file to exist)
     let config = match CentralConfig::load() {
@@ -148,6 +149,9 @@ async fn async_main() -> Result<()> {
     if headless {
         println!("Running in headless mode (no stdin)");
     }
+    if debug {
+        println!("Debug mode enabled (verbose metrics)");
+    }
     println!();
     print_help();
     println!();
@@ -228,7 +232,7 @@ async fn async_main() -> Result<()> {
                 let fp_store = Arc::clone(&fingerprint_store_conn);
                 tokio::spawn(async move {
                     if let Err(e) =
-                        handle_connection(incoming, nodes, onvif_nodes, mounts, admin_state, fp_store).await
+                        handle_connection(incoming, nodes, onvif_nodes, mounts, admin_state, fp_store, debug).await
                     {
                         eprintln!("Connection error: {}", e);
                     }
@@ -366,6 +370,7 @@ async fn handle_connection(
     mounts: Arc<gstreamer_rtsp_server::RTSPMountPoints>,
     admin_state: Arc<AdminState>,
     fingerprint_store: Arc<tokio::sync::Mutex<FingerprintStore>>,
+    debug: bool,
 ) -> Result<()> {
     let connection = incoming.await?;
     let remote = connection.remote_address();
@@ -550,7 +555,9 @@ async fn handle_connection(
                         let mut waiting_for_keyframe = true;
                         let mut pushed = 0u64;
 
-                        println!("  [appsrc] Thread started, waiting for keyframe");
+                        if debug {
+                            println!("  [appsrc] Thread started, waiting for keyframe");
+                        }
 
                         while let Ok(frame) = rx.recv() {
                             // Wait for keyframe before starting playback for smoother start
@@ -559,7 +566,9 @@ async fn handle_connection(
                                     continue;
                                 }
                                 waiting_for_keyframe = false;
-                                println!("  [appsrc] Got keyframe, starting playback");
+                                if debug {
+                                    println!("  [appsrc] Got keyframe, starting playback");
+                                }
                             }
 
                             // Create buffer - do_timestamp=true handles PTS
@@ -574,7 +583,7 @@ async fn handle_connection(
                             match appsrc.push_buffer(buffer) {
                                 Ok(_) => {
                                     pushed += 1;
-                                    if pushed % 30 == 0 {
+                                    if debug && pushed % 30 == 0 {
                                         println!("  [appsrc] Pushed {} buffers", pushed);
                                     }
                                 }
@@ -584,7 +593,9 @@ async fn handle_connection(
                                 }
                             }
                         }
-                        println!("  [appsrc] Thread exiting after {} buffers", pushed);
+                        if debug {
+                            println!("  [appsrc] Thread exiting after {} buffers", pushed);
+                        }
                     });
 
                     println!("RTSP media configured with appsrc for {}", media.element().name());
@@ -672,13 +683,15 @@ async fn handle_connection(
         let mut stats_interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             tokio::select! {
-                // Log QUIC connection stats and QoS metrics
+                // Log QUIC connection stats and QoS metrics (debug only)
                 _ = stats_interval.tick() => {
-                    quic_metrics::log_stats(&connection, &node_name);
+                    if debug {
+                        quic_metrics::log_stats(&connection, &node_name);
 
-                    // Print QoS metrics every 5 seconds
-                    if let Some(report) = qos.report_if_due() {
-                        println!("[{}:QoS] {}", node_name, report);
+                        // Print QoS metrics every 5 seconds
+                        if let Some(report) = qos.report_if_due() {
+                            println!("[{}:QoS] {}", node_name, report);
+                        }
                     }
                 }
 
@@ -932,6 +945,7 @@ fn print_help() {
     println!();
     println!("Options:");
     println!("  --headless                   - Run without stdin (admin via web only)");
+    println!("  --debug                      - Show verbose metrics (QUIC stats, QoS, frame counts)");
     println!();
     println!("Configuration: Run 'kaiju-central-setup' to configure network bindings and ports.");
 }
