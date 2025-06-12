@@ -208,37 +208,42 @@ async fn async_main(
 
     // Build source-specific pipeline
     if let Some(ref file_path) = file_source {
-        // File source pipeline: uridecodebin -> convert -> scale -> rate -> ...
-        let uri = format!("file://{}", file_path.canonicalize()?.display());
-        let src = gstreamer::ElementFactory::make("uridecodebin")
-            .property("uri", &uri)
+        // File source pipeline: filesrc -> qtdemux -> h264parse -> avdec_h264 -> convert -> ...
+        // Uses explicit software decoding (avdec_h264) to match real remote binary behavior
+        // and avoid hardware decoder issues (e.g., amlv4l2h264dec on ARM/Amlogic)
+        let filesrc = gstreamer::ElementFactory::make("filesrc")
+            .property("location", file_path.canonicalize()?.to_str().unwrap())
             .build()?;
+        let demux = gstreamer::ElementFactory::make("qtdemux").build()?;
+        let h264parse_in = gstreamer::ElementFactory::make("h264parse").build()?;
+        let decoder = gstreamer::ElementFactory::make("avdec_h264").build()?;
 
-        pipe.add_many([&src, &convert, &scale, &rate, &capsfilter, &encoder, &parser, sink.upcast_ref()])?;
-        // Link everything after convert (uridecodebin has dynamic pads)
-        gstreamer::Element::link_many([&convert, &scale, &rate, &capsfilter, &encoder, &parser, sink.upcast_ref()])?;
+        pipe.add_many([&filesrc, &demux, &h264parse_in, &decoder, &convert, &scale, &rate, &capsfilter, &encoder, &parser, sink.upcast_ref()])?;
+        // Link static elements
+        gstreamer::Element::link_many([&filesrc, &demux])?;
+        gstreamer::Element::link_many([&h264parse_in, &decoder, &convert, &scale, &rate, &capsfilter, &encoder, &parser, sink.upcast_ref()])?;
 
-        // Handle dynamic pad from uridecodebin
-        let convert_weak = convert.downgrade();
-        src.connect_pad_added(move |_src, src_pad| {
-            let Some(convert) = convert_weak.upgrade() else { return };
+        // Handle dynamic pad from qtdemux (video stream)
+        let h264parse_weak = h264parse_in.downgrade();
+        demux.connect_pad_added(move |_demux, src_pad| {
+            let Some(h264parse) = h264parse_weak.upgrade() else { return };
 
-            // Only link video pads
+            // Only link video pads (h264)
             let caps = src_pad.current_caps().or_else(|| Some(src_pad.query_caps(None)));
             if let Some(caps) = caps {
                 if let Some(structure) = caps.structure(0) {
-                    if !structure.name().starts_with("video/") {
-                        return; // Skip audio pads
+                    if !structure.name().as_str().contains("h264") && !structure.name().as_str().starts_with("video/x-h264") {
+                        return; // Skip non-h264 pads (audio, etc.)
                     }
                 }
             }
 
-            let sink_pad = convert.static_pad("sink").unwrap();
+            let sink_pad = h264parse.static_pad("sink").unwrap();
             if sink_pad.is_linked() {
                 return;
             }
             if let Err(e) = src_pad.link(&sink_pad) {
-                eprintln!("Failed to link uridecodebin pad: {:?}", e);
+                eprintln!("Failed to link qtdemux pad: {:?}", e);
             } else {
                 println!("Linked video pad from file");
             }
