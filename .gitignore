@@ -4,3 +4,4 @@ Cargo.lock
 *.mp4
 *.swp
 .DS_Store
+*additional*
