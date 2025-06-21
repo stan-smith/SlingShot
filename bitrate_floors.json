@@ -1,0 +1,166 @@
+{
+  "test_video": "/home/stan/LocalProjects/test.mp4",
+  "date": "2025-12-13T11:44:56.518040",
+  "results": {
+    "1920x1080@30": {
+      "min_bitrate_kbps": 800,
+      "max_failed_kbps": 750
+    },
+    "1920x1080@15": {
+      "min_bitrate_kbps": 550,
+      "max_failed_kbps": 500
+    },
+    "1280x720@30": {
+      "min_bitrate_kbps": 500,
+      "max_failed_kbps": 450
+    },
+    "1280x720@15": {
+      "min_bitrate_kbps": 300,
+      "max_failed_kbps": 250
+    },
+    "1024x576@30": {
+      "min_bitrate_kbps": 350,
+      "max_failed_kbps": 300
+    },
+    "1024x576@15": {
+      "min_bitrate_kbps": 200,
+      "max_failed_kbps": 150
+    },
+    "640x480@30": {
+      "min_bitrate_kbps": 200,
+      "max_failed_kbps": 150
+    },
+    "640x480@15": {
+      "min_bitrate_kbps": 150,
+      "max_failed_kbps": 0
+    },
+    "1920x1080@10": {
+      "min_bitrate_kbps": 450,
+      "max_failed_kbps": 425
+    },
+    "1920x1080@5": {
+      "min_bitrate_kbps": 250,
+      "max_failed_kbps": 225
+    },
+    "1920x1080@1": {
+      "min_bitrate_kbps": 200,
+      "max_failed_kbps": 175
+    },
+    "1280x720@10": {
+      "min_bitrate_kbps": 225,
+      "max_failed_kbps": 200
+    },
+    "1280x720@5": {
+      "min_bitrate_kbps": 150,
+      "max_failed_kbps": 125
+    },
+    "1280x720@1": {
+      "min_bitrate_kbps": 100,
+      "max_failed_kbps": 75
+    },
+    "1024x576@10": {
+      "min_bitrate_kbps": 150,
+      "max_failed_kbps": 125
+    },
+    "1024x576@5": {
+      "min_bitrate_kbps": 100,
+      "max_failed_kbps": 75
+    },
+    "1024x576@1": {
+      "min_bitrate_kbps": 100,
+      "max_failed_kbps": 75
+    },
+    "640x480@10": {
+      "min_bitrate_kbps": 75,
+      "max_failed_kbps": 50
+    },
+    "640x480@5": {
+      "min_bitrate_kbps": 75,
+      "max_failed_kbps": 50
+    },
+    "640x480@1": {
+      "min_bitrate_kbps": 75,
+      "max_failed_kbps": 50
+    },
+    "640x360@30": {
+      "min_bitrate_kbps": 150,
+      "max_failed_kbps": 145
+    },
+    "640x360@15": {
+      "min_bitrate_kbps": 100,
+      "max_failed_kbps": 95
+    },
+    "640x360@10": {
+      "min_bitrate_kbps": 80,
+      "max_failed_kbps": 75
+    },
+    "640x360@5": {
+      "min_bitrate_kbps": 50,
+      "max_failed_kbps": 45
+    },
+    "640x360@1": {
+      "min_bitrate_kbps": 50,
+      "max_failed_kbps": 45
+    },
+    "426x240@30": {
+      "min_bitrate_kbps": 90,
+      "max_failed_kbps": 85
+    },
+    "426x240@15": {
+      "min_bitrate_kbps": 55,
+      "max_failed_kbps": 50
+    },
+    "426x240@10": {
+      "min_bitrate_kbps": 60,
+      "max_failed_kbps": 55
+    },
+    "426x240@5": {
+      "min_bitrate_kbps": 35,
+      "max_failed_kbps": 30
+    },
+    "426x240@1": {
+      "min_bitrate_kbps": 30,
+      "max_failed_kbps": 25
+    },
+    "256x144@30": {
+      "min_bitrate_kbps": 40,
+      "max_failed_kbps": 35
+    },
+    "256x144@15": {
+      "min_bitrate_kbps": 35,
+      "max_failed_kbps": 30
+    },
+    "256x144@10": {
+      "min_bitrate_kbps": 30,
+      "max_failed_kbps": 25
+    },
+    "256x144@5": {
+      "min_bitrate_kbps": 25,
+      "max_failed_kbps": 20
+    },
+    "256x144@1": {
+      "min_bitrate_kbps": 25,
+      "max_failed_kbps": 20
+    },
+    "80x80@30": {
+      "min_bitrate_kbps": 15,
+      "max_failed_kbps": 0
+    },
+    "80x80@15": {
+      "min_bitrate_kbps": 15,
+      "max_failed_kbps": 0
+    },
+    "80x80@10": {
+      "min_bitrate_kbps": 15,
+      "max_failed_kbps": 0
+    },
+    "80x80@5": {
+      "min_bitrate_kbps": 15,
+      "max_failed_kbps": 0
+    },
+    "80x80@1": {
+      "min_bitrate_kbps": 10,
+      "max_failed_kbps": 0
+    }
+  }
+}
