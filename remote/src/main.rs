@@ -1,5 +1,6 @@
 mod storage;
 
+use adaptive_bitrate::{AdaptiveController, QualityChange};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use config_manager::{
@@ -185,6 +186,7 @@ fn load_or_build_config(cli: &Cli) -> Result<(RemoteConfig, bool)> {
             recording: config_manager::RecordingConfig::default(),
             storage: CfgStorageConfig::default(),
             encryption_enabled: false,
+            adaptive: None,
         };
 
         Ok((config, true)) // Will save after prompts
@@ -444,6 +446,37 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
         params: StreamParams::default(),
         source_framerate: None,
     }));
+
+    // Initialize adaptive bitrate controller if enabled
+    let adaptive_controller: Option<Arc<Mutex<AdaptiveController>>> =
+        if let Some(ref adaptive_config) = config.adaptive {
+            if adaptive_config.enabled {
+                let controller = AdaptiveController::new(adaptive_config);
+                // Set initial stream params from adaptive config
+                {
+                    let mut state = pipeline_state.lock().unwrap();
+                    state.params.width = adaptive_config.target_width;
+                    state.params.height = adaptive_config.target_height;
+                    state.params.framerate = Some(adaptive_config.target_framerate);
+                    state.params.bitrate = adaptive_config.target_bitrate;
+                }
+                println!(
+                    "[ABR] Adaptive bitrate enabled: {}x{}@{}fps, target {} kbps",
+                    adaptive_config.target_width,
+                    adaptive_config.target_height,
+                    adaptive_config.target_framerate,
+                    adaptive_config.target_bitrate
+                );
+                Some(Arc::new(Mutex::new(controller)))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+    // Track previous QUIC stats for delta calculation (ABR needs per-interval loss, not cumulative)
+    let prev_quic_stats: Arc<Mutex<(u64, u64)>> = Arc::new(Mutex::new((0, 0))); // (lost, sent)
 
     // Create channel for video frames (will be sent over QUIC)
     let (frame_tx, mut frame_rx) = mpsc::channel::<quic_video::VideoFrame>(30);
@@ -794,7 +827,7 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
             let mut last_report_bytes = 0u64;
 
             // Command loop with video sending, heartbeat, and periodic recorder health check
-            let mut health_check_interval = tokio::time::interval(Duration::from_secs(5));
+            let mut health_check_interval = tokio::time::interval(Duration::from_secs(3));
             let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
             let mut conn_state = ConnectionState::default();
             loop {
@@ -909,6 +942,89 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                         // Log QUIC connection stats (debug only)
                         if debug {
                             quic_metrics::log_stats(&connection, &config.node_name);
+                        }
+
+                        // Adaptive bitrate control - process QUIC metrics
+                        if let Some(ref controller) = adaptive_controller {
+                            let stats = connection.stats();
+                            let curr_lost = stats.path.lost_packets;
+                            let curr_sent = stats.path.sent_packets;
+                            let rtt_ms = stats.path.rtt.as_millis() as u64;
+
+                            // Compute delta loss (per-interval, not cumulative)
+                            let (delta_lost, delta_sent) = {
+                                let mut prev = prev_quic_stats.lock().unwrap();
+                                let (prev_lost, prev_sent) = *prev;
+                                *prev = (curr_lost, curr_sent);
+                                (
+                                    curr_lost.saturating_sub(prev_lost),
+                                    curr_sent.saturating_sub(prev_sent),
+                                )
+                            };
+
+                            let loss_pct = if delta_sent > 0 {
+                                (delta_lost as f64 / delta_sent as f64) * 100.0
+                            } else {
+                                0.0
+                            };
+
+                            let mut ctrl = controller.lock().unwrap();
+                            if let Some(change) = ctrl.process(loss_pct, rtt_ms) {
+                                let mut state = pipeline_state.lock().unwrap();
+                                let (action, step) = match change {
+                                    QualityChange::StepDown(s) => ("down", s),
+                                    QualityChange::StepUp(s) => ("up", s),
+                                };
+
+                                // Apply resolution change
+                                if step.width != state.params.width
+                                    || step.height != state.params.height
+                                {
+                                    state.params.width = step.width;
+                                    state.params.height = step.height;
+                                    if let Some(ref caps) = state.capsfilter {
+                                        let new_caps = gstreamer::Caps::builder("video/x-raw")
+                                            .field("width", step.width)
+                                            .field("height", step.height)
+                                            .build();
+                                        caps.set_property("caps", &new_caps);
+                                    }
+                                }
+
+                                // Apply framerate change
+                                if Some(step.framerate) != state.params.framerate {
+                                    state.params.framerate = Some(step.framerate);
+                                    if let Some(ref rate) = state.videorate {
+                                        rate.set_property("max-rate", step.framerate);
+                                    }
+                                }
+
+                                // Apply bitrate change
+                                // Step down: use floor bitrate. Step up: use target bitrate
+                                let new_bitrate = if action == "down" {
+                                    step.min_bitrate
+                                } else {
+                                    // When stepping up, use target bitrate from config
+                                    config.adaptive.as_ref().map(|a| a.target_bitrate).unwrap_or(step.min_bitrate)
+                                };
+                                if new_bitrate != state.params.bitrate {
+                                    state.params.bitrate = new_bitrate;
+                                    if let Some(ref encoder) = state.encoder {
+                                        encoder.set_property("bitrate", new_bitrate);
+                                    }
+                                }
+
+                                println!(
+                                    "[ABR] Quality {} to {}x{}@{}fps, {} kbps (loss={:.1}%, rtt={}ms)",
+                                    action,
+                                    step.width,
+                                    step.height,
+                                    step.framerate,
+                                    new_bitrate,
+                                    loss_pct,
+                                    rtt_ms
+                                );
+                            }
                         }
 
                         // Check recorder health

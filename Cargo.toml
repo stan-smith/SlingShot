@@ -16,4 +16,5 @@ members = [
     "central-setup",
     "fingerprint-store",
     "kaiju-encryption",
+    "adaptive-bitrate",
 ]

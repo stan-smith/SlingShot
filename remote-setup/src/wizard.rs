@@ -1,6 +1,7 @@
 use anyhow::Result;
 use config_manager::{
-    OnvifConfig, RecordingConfig, RemoteConfig, RtspConfig, SourceConfig, StorageConfig,
+    AdaptiveConfig, AdaptivePriority, OnvifConfig, RecordingConfig, RemoteConfig, RtspConfig,
+    SourceConfig, StorageConfig,
 };
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
 use onvif_client::OnvifClient;
@@ -76,6 +77,12 @@ pub fn run_wizard() -> Result<()> {
 
     let encryption_enabled = configure_encryption(&existing)?;
 
+    println!();
+    println!("--- Streaming ---");
+    println!();
+
+    let adaptive = configure_adaptive(&existing)?;
+
     // Build config
     let config = RemoteConfig {
         node_name: node_name.clone(),
@@ -84,6 +91,7 @@ pub fn run_wizard() -> Result<()> {
         recording,
         storage,
         encryption_enabled,
+        adaptive,
     };
 
     // Show summary
@@ -271,6 +279,207 @@ fn configure_encryption(existing: &Option<RemoteConfig>) -> Result<bool> {
     Ok(enabled)
 }
 
+fn configure_adaptive(existing: &Option<RemoteConfig>) -> Result<Option<AdaptiveConfig>> {
+    let existing_adaptive = existing.as_ref().and_then(|c| c.adaptive.as_ref());
+
+    println!("Adaptive bitrate automatically adjusts video quality based on network conditions.");
+    println!("It will reduce quality during congestion and restore it when the network improves.");
+    println!();
+
+    let enabled = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("Enable adaptive bitrate?")
+        .default(existing_adaptive.map(|a| a.enabled).unwrap_or(false))
+        .interact()?;
+
+    if !enabled {
+        return Ok(None);
+    }
+
+    // Target resolution selection
+    let resolution_options = vec![
+        "1920x1080 (Full HD)",
+        "1280x720 (HD)",
+        "1024x576 (Wide SD)",
+        "640x480 (SD)",
+    ];
+    let default_res = existing_adaptive
+        .map(|a| match (a.target_width, a.target_height) {
+            (1920, 1080) => 0,
+            (1280, 720) => 1,
+            (1024, 576) => 2,
+            _ => 3,
+        })
+        .unwrap_or(1); // Default to 720p
+
+    let resolution_idx = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Target resolution (maximum)")
+        .items(&resolution_options)
+        .default(default_res)
+        .interact()?;
+
+    let (target_width, target_height) = match resolution_idx {
+        0 => (1920, 1080),
+        1 => (1280, 720),
+        2 => (1024, 576),
+        _ => (640, 480),
+    };
+
+    // Target framerate
+    let framerate_options = vec!["30 fps", "15 fps", "10 fps"];
+    let default_fps = existing_adaptive
+        .map(|a| match a.target_framerate {
+            30 => 0,
+            15 => 1,
+            _ => 2,
+        })
+        .unwrap_or(0);
+
+    let fps_idx = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Target framerate (maximum)")
+        .items(&framerate_options)
+        .default(default_fps)
+        .interact()?;
+
+    let target_framerate = match fps_idx {
+        0 => 30,
+        1 => 15,
+        _ => 10,
+    };
+
+    // Target bitrate
+    let target_bitrate: u32 = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Target bitrate (kbps)")
+        .default(existing_adaptive.map(|a| a.target_bitrate).unwrap_or(2000))
+        .validate_with(|input: &u32| -> Result<(), &str> {
+            if *input >= 100 && *input <= 20000 {
+                Ok(())
+            } else {
+                Err("Bitrate must be between 100 and 20000 kbps")
+            }
+        })
+        .interact_text()?;
+
+    // Priority preference
+    let priority_options = vec![
+        "Resolution (preserve sharpness, reduce smoothness first)",
+        "Framerate (preserve smoothness, reduce sharpness first)",
+        "Balanced (reduce both proportionally)",
+    ];
+    let default_priority = existing_adaptive
+        .map(|a| match a.priority {
+            AdaptivePriority::Resolution => 0,
+            AdaptivePriority::Framerate => 1,
+            AdaptivePriority::Balanced => 2,
+        })
+        .unwrap_or(2);
+
+    let priority_idx = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Quality priority when degrading")
+        .items(&priority_options)
+        .default(default_priority)
+        .interact()?;
+
+    let priority = match priority_idx {
+        0 => AdaptivePriority::Resolution,
+        1 => AdaptivePriority::Framerate,
+        _ => AdaptivePriority::Balanced,
+    };
+
+    // Minimum resolution
+    let min_options = vec![
+        "640x360 (acceptable minimum)",
+        "426x240 (low quality fallback)",
+        "256x144 (emergency only)",
+    ];
+    let default_min = existing_adaptive
+        .map(|a| match (a.min_width, a.min_height) {
+            (640, 360) => 0,
+            (426, 240) => 1,
+            _ => 2,
+        })
+        .unwrap_or(0);
+
+    let min_idx = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Minimum acceptable resolution")
+        .items(&min_options)
+        .default(default_min)
+        .interact()?;
+
+    let (min_width, min_height) = match min_idx {
+        0 => (640, 360),
+        1 => (426, 240),
+        _ => (256, 144),
+    };
+
+    // Advanced settings (optional)
+    println!();
+    let configure_advanced = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("Configure advanced thresholds?")
+        .default(false)
+        .interact()?;
+
+    let (loss_threshold, rtt_threshold_ms, recovery_delay_secs) = if configure_advanced {
+        println!();
+        println!("Advanced ABR thresholds (press Enter for defaults):");
+        println!();
+
+        let loss: f64 = Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Packet loss % to trigger step-down")
+            .default(existing_adaptive.map(|a| a.loss_threshold).unwrap_or(2.0))
+            .validate_with(|input: &f64| -> Result<(), &str> {
+                if *input > 0.0 && *input <= 50.0 {
+                    Ok(())
+                } else {
+                    Err("Must be between 0.1 and 50%")
+                }
+            })
+            .interact_text()?;
+
+        let rtt: u64 = Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("RTT (ms) to trigger step-down")
+            .default(existing_adaptive.map(|a| a.rtt_threshold_ms).unwrap_or(200))
+            .validate_with(|input: &u64| -> Result<(), &str> {
+                if *input >= 50 && *input <= 5000 {
+                    Ok(())
+                } else {
+                    Err("Must be between 50 and 5000 ms")
+                }
+            })
+            .interact_text()?;
+
+        let recovery: u64 = Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Recovery delay (seconds) after step-down")
+            .default(existing_adaptive.map(|a| a.recovery_delay_secs).unwrap_or(15))
+            .validate_with(|input: &u64| -> Result<(), &str> {
+                if *input >= 5 && *input <= 300 {
+                    Ok(())
+                } else {
+                    Err("Must be between 5 and 300 seconds")
+                }
+            })
+            .interact_text()?;
+
+        (loss, rtt, recovery)
+    } else {
+        // Use sensible defaults for remote deployments
+        (2.0, 200, 5)
+    };
+
+    Ok(Some(AdaptiveConfig {
+        enabled: true,
+        target_width,
+        target_height,
+        target_framerate,
+        target_bitrate,
+        min_width,
+        min_height,
+        priority,
+        loss_threshold,
+        rtt_threshold_ms,
+        recovery_delay_secs,
+    }))
+}
+
 fn print_config_summary(config: &RemoteConfig) {
     println!("Node name:       {}", config.node_name);
     println!("Central address: {}", config.central_address);
@@ -308,6 +517,29 @@ fn print_config_summary(config: &RemoteConfig) {
             "disabled"
         }
     );
+
+    match &config.adaptive {
+        Some(adaptive) if adaptive.enabled => {
+            let priority_str = match adaptive.priority {
+                AdaptivePriority::Resolution => "resolution",
+                AdaptivePriority::Framerate => "framerate",
+                AdaptivePriority::Balanced => "balanced",
+            };
+            println!(
+                "Adaptive:        enabled ({}x{}@{}fps, {} kbps, {} priority, min {}x{})",
+                adaptive.target_width,
+                adaptive.target_height,
+                adaptive.target_framerate,
+                adaptive.target_bitrate,
+                priority_str,
+                adaptive.min_width,
+                adaptive.min_height
+            );
+        }
+        _ => {
+            println!("Adaptive:        disabled");
+        }
+    }
 }
 
 fn mask_rtsp_password(url: &str) -> String {

@@ -1,0 +1,8 @@
+[package]
+name = "adaptive-bitrate"
+version = "0.1.0"
+edition = "2021"
+description = "Adaptive bitrate control for video streaming based on QUIC QoS metrics"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

@@ -7,6 +7,8 @@ use crate::paths;
 use crate::source::SourceConfig;
 use crate::storage::StorageConfig;
 
+pub use adaptive_bitrate::{AdaptiveConfig, AdaptivePriority};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CentralConfig {
     /// Network interfaces to bind services to (e.g., ["127.0.0.1", "192.168.1.100"])
@@ -130,6 +132,9 @@ pub struct RemoteConfig {
     /// Enable encryption for recordings (requires key from central)
     #[serde(default)]
     pub encryption_enabled: bool,
+    /// Adaptive bitrate configuration
+    #[serde(default)]
+    pub adaptive: Option<AdaptiveConfig>,
 }
 
 impl RemoteConfig {

@@ -23,6 +23,7 @@ rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/quic-video/ k
 rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/recording-retrieval/ khadas@khadas:~/recording-retrieval/
 rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/kaiju-encryption/ khadas@khadas:~/kaiju-encryption/
 rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/config-manager/ khadas@khadas:~/config-manager/
+rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/adaptive-bitrate/ khadas@khadas:~/adaptive-bitrate/
 ```
 
 After syncing, build on khadas:

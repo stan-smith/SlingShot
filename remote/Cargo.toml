@@ -47,3 +47,6 @@ recording-retrieval = { path = "../recording-retrieval" }
 
 # Configuration management
 config-manager = { path = "../config-manager" }
+
+# Adaptive bitrate control
+adaptive-bitrate = { path = "../adaptive-bitrate" }

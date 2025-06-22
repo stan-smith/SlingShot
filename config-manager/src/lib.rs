@@ -7,7 +7,7 @@ mod paths;
 mod source;
 mod storage;
 
-pub use config::{CentralConfig, RecordingConfig, RemoteConfig};
+pub use config::{AdaptiveConfig, AdaptivePriority, CentralConfig, RecordingConfig, RemoteConfig};
 pub use encryption::EncryptionConfig;
 pub use error::ConfigError;
 pub use identity::IdentityConfig;
