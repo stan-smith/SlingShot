@@ -33,9 +33,10 @@ pub const MIN_CIPHERTEXT_LEN: usize = EPHEMERAL_KEY_LEN + NONCE_LEN + TAG_LEN;
 /// HKDF info string for key derivation
 const HKDF_INFO: &[u8] = b"kaiju-recording-encryption";
 
-/// Derive an AES-256 key from a shared secret using HKDF-SHA256
-fn derive_aes_key(shared_secret: &[u8; 32]) -> [u8; 32] {
-    let hk = Hkdf::<Sha256>::new(None, shared_secret);
+/// Derive an AES-256 key from a shared secret using HKDF-SHA256.
+/// Uses nonce as salt for defense-in-depth (per HKDF best practices).
+fn derive_aes_key(shared_secret: &[u8; 32], salt: &[u8]) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(Some(salt), shared_secret);
     let mut aes_key = [0u8; 32];
     hk.expand(HKDF_INFO, &mut aes_key)
         .expect("HKDF expand should not fail with valid length");
@@ -58,13 +59,13 @@ pub fn seal(plaintext: &[u8], recipient_pubkey: &PublicKey) -> Result<Vec<u8>, E
     // Compute shared secret via ECDH
     let shared_secret = ephemeral.secret().diffie_hellman(recipient_pubkey);
 
-    // Derive AES key
-    let aes_key = derive_aes_key(shared_secret.as_bytes());
-
     // Generate random nonce
     let mut nonce_bytes = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
+
+    // Derive AES key using nonce as salt
+    let aes_key = derive_aes_key(shared_secret.as_bytes(), &nonce_bytes);
 
     // Encrypt with AES-256-GCM
     let cipher = Aes256Gcm::new_from_slice(&aes_key)
@@ -118,8 +119,8 @@ pub fn open(ciphertext: &[u8], recipient_secret: &StaticSecret) -> Result<Vec<u8
     // Compute shared secret via ECDH
     let shared_secret = recipient_secret.diffie_hellman(&ephemeral_pubkey);
 
-    // Derive AES key
-    let aes_key = derive_aes_key(shared_secret.as_bytes());
+    // Derive AES key using nonce as salt
+    let aes_key = derive_aes_key(shared_secret.as_bytes(), &nonce_bytes);
 
     // Decrypt with AES-256-GCM
     let cipher = Aes256Gcm::new_from_slice(&aes_key)

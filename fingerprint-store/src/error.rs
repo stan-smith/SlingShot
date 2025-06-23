@@ -20,4 +20,7 @@ pub enum StoreError {
         max: usize,
         actual: usize,
     },
+
+    #[error("Invalid fingerprint: {0}")]
+    InvalidFingerprint(String),
 }

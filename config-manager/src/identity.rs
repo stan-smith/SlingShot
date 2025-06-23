@@ -70,11 +70,12 @@ impl IdentityConfig {
         self.save_to(&path)
     }
 
-    /// Save identity to specific path
+    /// Save identity to specific path.
+    /// Uses restrictive file permissions (0600 on Unix) since this contains the secret key.
     pub fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
         paths::ensure_config_dir()?;
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
+        paths::write_secure(path, &content)?;
         Ok(())
     }
 }

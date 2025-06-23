@@ -10,3 +10,7 @@ dirs = "5"
 thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
 kaiju-encryption = { path = "../kaiju-encryption" }
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

@@ -38,24 +38,67 @@ impl SegmentEncryptor {
     }
 
     /// Scan for existing files (call once at startup to avoid encrypting old files)
+    /// Also cleans up orphaned plaintext files that have corresponding .enc files
+    /// and incomplete .enc.tmp files from interrupted encryption.
     pub fn scan_existing(&mut self) -> Result<(), EncryptorError> {
+        // First pass: collect all files and identify encrypted ones
+        let mut encrypted_stems: HashSet<PathBuf> = HashSet::new();
+        let mut plaintext_files: Vec<PathBuf> = Vec::new();
+        let mut temp_files: Vec<PathBuf> = Vec::new();
+
         for entry in fs::read_dir(&self.output_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().map(|e| e == self.file_format.as_str()).unwrap_or(false) {
-                self.known_files.insert(path);
+            let path_str = path.to_string_lossy();
+
+            // Check for temp files from interrupted encryption
+            if path_str.ends_with(".enc.tmp") {
+                temp_files.push(path);
+                continue;
             }
-        }
-        // Also track existing encrypted files
-        for entry in fs::read_dir(&self.output_dir)? {
-            let entry = entry?;
-            let path = entry.path();
+
+            // Check for encrypted files
             if path.extension().map(|e| e == ENCRYPTED_EXT).unwrap_or(false) {
-                // Track the original name so we don't try to re-encrypt
+                // Get the original stem (e.g., "file.mp4" from "file.mp4.enc")
                 let original = path.with_extension("");
+                encrypted_stems.insert(original.clone());
                 self.known_files.insert(original);
+                continue;
+            }
+
+            // Check for plaintext recording files
+            if path.extension().map(|e| e == self.file_format.as_str()).unwrap_or(false) {
+                plaintext_files.push(path);
             }
         }
+
+        // Clean up temp files from interrupted encryption
+        for temp_path in temp_files {
+            eprintln!(
+                "[CLEANUP] Removing incomplete temp file: {}",
+                temp_path.display()
+            );
+            if let Err(e) = fs::remove_file(&temp_path) {
+                eprintln!("Warning: Failed to remove temp file {}: {}", temp_path.display(), e);
+            }
+        }
+
+        // Process plaintext files
+        for path in plaintext_files {
+            if encrypted_stems.contains(&path) {
+                // Orphaned plaintext - encrypted version exists, delete the plaintext
+                eprintln!(
+                    "[CLEANUP] Removing orphaned plaintext (encrypted version exists): {}",
+                    path.display()
+                );
+                if let Err(e) = fs::remove_file(&path) {
+                    eprintln!("Warning: Failed to remove orphaned file {}: {}", path.display(), e);
+                }
+            }
+            // Track all plaintext files (even if we just deleted them, to prevent re-processing)
+            self.known_files.insert(path);
+        }
+
         Ok(())
     }
 
@@ -108,36 +151,54 @@ impl SegmentEncryptor {
         Ok(encrypted_count)
     }
 
-    /// Encrypt a single file and delete the original
+    /// Encrypt a single file and delete the original.
+    /// Uses atomic write pattern: write to temp file, verify, rename, then delete original.
+    /// If deletion fails, the orphaned plaintext will be cleaned up on next scan_existing().
     fn encrypt_file(&self, path: &Path) -> Result<(), EncryptorError> {
         // Read plaintext
         let plaintext = fs::read(path)?;
+        let plaintext_len = plaintext.len();
 
         // Encrypt
         let ciphertext = seal_with_hex_key(&plaintext, &self.pubkey_hex)?;
+        let ciphertext_len = ciphertext.len();
 
-        // Write encrypted file with .enc extension appended
+        // Write to temp file first (atomic write pattern)
         let encrypted_path = PathBuf::from(format!("{}.{}", path.display(), ENCRYPTED_EXT));
-        fs::write(&encrypted_path, &ciphertext)?;
+        let temp_path = PathBuf::from(format!("{}.{}.tmp", path.display(), ENCRYPTED_EXT));
 
-        // Verify encrypted file was written
-        let written_size = fs::metadata(&encrypted_path)?.len();
-        if written_size != ciphertext.len() as u64 {
-            fs::remove_file(&encrypted_path)?;
+        fs::write(&temp_path, &ciphertext)?;
+
+        // Verify temp file was written correctly
+        let written_size = fs::metadata(&temp_path)?.len();
+        if written_size != ciphertext_len as u64 {
+            // Clean up failed temp file
+            let _ = fs::remove_file(&temp_path);
             return Err(EncryptorError::VerificationFailed(
                 "encrypted file size mismatch".into(),
             ));
         }
 
-        // Delete original
-        fs::remove_file(path)?;
+        // Atomic rename: temp -> final (atomic on POSIX when same filesystem)
+        fs::rename(&temp_path, &encrypted_path)?;
+
+        // Now safe to delete original.
+        // If this fails, the file will be cleaned up on next scan_existing()
+        // since the .enc file now exists.
+        if let Err(e) = fs::remove_file(path) {
+            eprintln!(
+                "Warning: Failed to delete original {} after encryption: {}. Will be cleaned up on restart.",
+                path.display(),
+                e
+            );
+        }
 
         println!(
             "Encrypted: {} ({} bytes) -> {} ({} bytes)",
             path.display(),
-            plaintext.len(),
+            plaintext_len,
             encrypted_path.display(),
-            ciphertext.len()
+            ciphertext_len
         );
 
         Ok(())
@@ -244,5 +305,72 @@ mod tests {
 
         assert!(!test_file.exists());
         assert!(dir.path().join("final-segment.mp4.enc").exists());
+    }
+
+    #[test]
+    fn test_scan_existing_cleans_orphaned_plaintext() {
+        let dir = tempdir().unwrap();
+        let keypair = X25519KeyPair::generate();
+
+        // Simulate crash scenario: both .mp4 and .mp4.enc exist
+        let plaintext_file = dir.path().join("orphan.mp4");
+        let encrypted_file = dir.path().join("orphan.mp4.enc");
+        fs::write(&plaintext_file, b"orphaned plaintext").unwrap();
+        fs::write(&encrypted_file, b"encrypted data").unwrap();
+
+        let mut encryptor = SegmentEncryptor::new(
+            dir.path().to_path_buf(),
+            "mp4".to_string(),
+            keypair.public_hex(),
+        );
+
+        // scan_existing should clean up the orphaned plaintext
+        encryptor.scan_existing().unwrap();
+
+        // Plaintext should be deleted, encrypted should remain
+        assert!(!plaintext_file.exists(), "Orphaned plaintext should be deleted");
+        assert!(encrypted_file.exists(), "Encrypted file should remain");
+    }
+
+    #[test]
+    fn test_scan_existing_cleans_temp_files() {
+        let dir = tempdir().unwrap();
+        let keypair = X25519KeyPair::generate();
+
+        // Simulate interrupted encryption: .enc.tmp file exists
+        let temp_file = dir.path().join("interrupted.mp4.enc.tmp");
+        fs::write(&temp_file, b"incomplete encryption").unwrap();
+
+        let mut encryptor = SegmentEncryptor::new(
+            dir.path().to_path_buf(),
+            "mp4".to_string(),
+            keypair.public_hex(),
+        );
+
+        encryptor.scan_existing().unwrap();
+
+        // Temp file should be cleaned up
+        assert!(!temp_file.exists(), "Temp file should be deleted");
+    }
+
+    #[test]
+    fn test_scan_existing_preserves_unencrypted_without_pair() {
+        let dir = tempdir().unwrap();
+        let keypair = X25519KeyPair::generate();
+
+        // Normal unencrypted file (no .enc pair)
+        let plaintext_file = dir.path().join("normal.mp4");
+        fs::write(&plaintext_file, b"normal recording").unwrap();
+
+        let mut encryptor = SegmentEncryptor::new(
+            dir.path().to_path_buf(),
+            "mp4".to_string(),
+            keypair.public_hex(),
+        );
+
+        encryptor.scan_existing().unwrap();
+
+        // Should NOT be deleted (no encrypted version exists)
+        assert!(plaintext_file.exists(), "Normal plaintext should be preserved");
     }
 }
