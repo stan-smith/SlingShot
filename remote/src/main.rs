@@ -476,7 +476,8 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
         };
 
     // Track previous QUIC stats for delta calculation (ABR needs per-interval loss, not cumulative)
-    let prev_quic_stats: Arc<Mutex<(u64, u64)>> = Arc::new(Mutex::new((0, 0))); // (lost, sent)
+    // None = first sample (initialize only, don't process), Some = subsequent samples
+    let prev_quic_stats: Arc<Mutex<Option<(u64, u64)>>> = Arc::new(Mutex::new(None));
 
     // Create channel for video frames (will be sent over QUIC)
     let (frame_tx, mut frame_rx) = mpsc::channel::<quic_video::VideoFrame>(30);
@@ -952,14 +953,28 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                             let rtt_ms = stats.path.rtt.as_millis() as u64;
 
                             // Compute delta loss (per-interval, not cumulative)
-                            let (delta_lost, delta_sent) = {
+                            // First sample initializes baseline, subsequent samples compute delta
+                            let maybe_delta = {
                                 let mut prev = prev_quic_stats.lock().unwrap();
-                                let (prev_lost, prev_sent) = *prev;
-                                *prev = (curr_lost, curr_sent);
-                                (
-                                    curr_lost.saturating_sub(prev_lost),
-                                    curr_sent.saturating_sub(prev_sent),
-                                )
+                                match *prev {
+                                    None => {
+                                        // First sample: initialize baseline, skip processing
+                                        *prev = Some((curr_lost, curr_sent));
+                                        None
+                                    }
+                                    Some((prev_lost, prev_sent)) => {
+                                        *prev = Some((curr_lost, curr_sent));
+                                        Some((
+                                            curr_lost.saturating_sub(prev_lost),
+                                            curr_sent.saturating_sub(prev_sent),
+                                        ))
+                                    }
+                                }
+                            };
+
+                            // Skip ABR processing on first sample
+                            let Some((delta_lost, delta_sent)) = maybe_delta else {
+                                continue;
                             };
 
                             let loss_pct = if delta_sent > 0 {
@@ -976,24 +991,28 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                                     QualityChange::StepUp(s) => ("up", s),
                                 };
 
-                                // Apply resolution change
-                                if step.width != state.params.width
-                                    || step.height != state.params.height
-                                {
+                                // Apply resolution and framerate changes together via capsfilter
+                                // (matches manual command behavior)
+                                let res_changed = step.width != state.params.width
+                                    || step.height != state.params.height;
+                                let fps_changed = Some(step.framerate) != state.params.framerate;
+
+                                if res_changed || fps_changed {
                                     state.params.width = step.width;
                                     state.params.height = step.height;
+                                    state.params.framerate = Some(step.framerate);
+
+                                    // Build caps with resolution and framerate
                                     if let Some(ref caps) = state.capsfilter {
                                         let new_caps = gstreamer::Caps::builder("video/x-raw")
                                             .field("width", step.width)
                                             .field("height", step.height)
+                                            .field("framerate", gstreamer::Fraction::new(step.framerate, 1))
                                             .build();
                                         caps.set_property("caps", &new_caps);
                                     }
-                                }
 
-                                // Apply framerate change
-                                if Some(step.framerate) != state.params.framerate {
-                                    state.params.framerate = Some(step.framerate);
+                                    // Also set videorate max-rate for consistency
                                     if let Some(ref rate) = state.videorate {
                                         rate.set_property("max-rate", step.framerate);
                                     }
