@@ -64,7 +64,9 @@ impl QualityLadder {
     /// - Resolution: Keep resolution, vary framerate first
     /// - Framerate: Keep framerate, vary resolution first
     /// - Balanced: Interleave resolution and framerate changes
-    pub fn new(config: &AdaptiveConfig, floors: &BitrateFloors) -> Self {
+    ///
+    /// Returns None if no valid quality steps could be generated from the config.
+    pub fn new(config: &AdaptiveConfig, floors: &BitrateFloors) -> Option<Self> {
         let steps = match config.priority {
             AdaptivePriority::Resolution => {
                 Self::generate_resolution_priority(config, floors)
@@ -77,10 +79,14 @@ impl QualityLadder {
             }
         };
 
-        Self {
+        if steps.is_empty() {
+            return None;
+        }
+
+        Some(Self {
             steps,
             current_index: 0,
-        }
+        })
     }
 
     /// Generate ladder with resolution priority
@@ -273,7 +279,7 @@ mod tests {
     fn test_ladder_generation() {
         let config = test_config();
         let floors = BitrateFloors::load_embedded();
-        let ladder = QualityLadder::new(&config, &floors);
+        let ladder = QualityLadder::new(&config, &floors).expect("ladder should be created");
 
         assert!(!ladder.is_empty());
         // First step should be target resolution
@@ -287,7 +293,7 @@ mod tests {
     fn test_step_down_up() {
         let config = test_config();
         let floors = BitrateFloors::load_embedded();
-        let mut ladder = QualityLadder::new(&config, &floors);
+        let mut ladder = QualityLadder::new(&config, &floors).expect("ladder should be created");
 
         // Should be able to step down from start
         assert!(ladder.can_step_down());
@@ -314,7 +320,7 @@ mod tests {
         config.priority = AdaptivePriority::Resolution;
 
         let floors = BitrateFloors::load_embedded();
-        let ladder = QualityLadder::new(&config, &floors);
+        let ladder = QualityLadder::new(&config, &floors).expect("ladder should be created");
 
         // In resolution priority, we should see all framerates for
         // 1280x720 before seeing 1024x576
@@ -342,7 +348,7 @@ mod tests {
         config.priority = AdaptivePriority::Framerate;
 
         let floors = BitrateFloors::load_embedded();
-        let ladder = QualityLadder::new(&config, &floors);
+        let ladder = QualityLadder::new(&config, &floors).expect("ladder should be created");
 
         // In framerate priority, we should see all resolutions at 30fps
         // before seeing any at 15fps

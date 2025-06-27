@@ -451,23 +451,38 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
     let adaptive_controller: Option<Arc<Mutex<AdaptiveController>>> =
         if let Some(ref adaptive_config) = config.adaptive {
             if adaptive_config.enabled {
-                let controller = AdaptiveController::new(adaptive_config);
-                // Set initial stream params from adaptive config
-                {
-                    let mut state = pipeline_state.lock().unwrap();
-                    state.params.width = adaptive_config.target_width;
-                    state.params.height = adaptive_config.target_height;
-                    state.params.framerate = Some(adaptive_config.target_framerate);
-                    state.params.bitrate = adaptive_config.target_bitrate;
+                match AdaptiveController::new(adaptive_config) {
+                    Some(controller) => {
+                        // Set initial stream params from adaptive config
+                        {
+                            let mut state = pipeline_state.lock().unwrap();
+                            state.params.width = adaptive_config.target_width;
+                            state.params.height = adaptive_config.target_height;
+                            state.params.framerate = Some(adaptive_config.target_framerate);
+                            state.params.bitrate = adaptive_config.target_bitrate;
+                        }
+                        println!(
+                            "[ABR] Adaptive bitrate enabled: {}x{}@{}fps, target {} kbps",
+                            adaptive_config.target_width,
+                            adaptive_config.target_height,
+                            adaptive_config.target_framerate,
+                            adaptive_config.target_bitrate
+                        );
+                        Some(Arc::new(Mutex::new(controller)))
+                    }
+                    None => {
+                        eprintln!(
+                            "[ABR] Warning: Could not create quality ladder from config \
+                            ({}x{} -> {}x{}, {}fps). ABR disabled.",
+                            adaptive_config.target_width,
+                            adaptive_config.target_height,
+                            adaptive_config.min_width,
+                            adaptive_config.min_height,
+                            adaptive_config.target_framerate
+                        );
+                        None
+                    }
                 }
-                println!(
-                    "[ABR] Adaptive bitrate enabled: {}x{}@{}fps, target {} kbps",
-                    adaptive_config.target_width,
-                    adaptive_config.target_height,
-                    adaptive_config.target_framerate,
-                    adaptive_config.target_bitrate
-                );
-                Some(Arc::new(Mutex::new(controller)))
             } else {
                 None
             }

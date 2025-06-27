@@ -119,9 +119,11 @@ pub struct AdaptiveController {
 
 impl AdaptiveController {
     /// Create a new adaptive controller
-    pub fn new(config: &AdaptiveConfig) -> Self {
+    ///
+    /// Returns None if no valid quality ladder could be generated from the config.
+    pub fn new(config: &AdaptiveConfig) -> Option<Self> {
         let floors = BitrateFloors::load_embedded();
-        let ladder = QualityLadder::new(config, &floors);
+        let ladder = QualityLadder::new(config, &floors)?;
 
         // Use thresholds from config (with sensible defaults)
         let thresholds = Thresholds {
@@ -137,7 +139,7 @@ impl AdaptiveController {
         let initial_bitrate = config.target_bitrate;
         let recovery_delay = thresholds.recovery_delay;
 
-        Self {
+        Some(Self {
             ladder,
             metrics: SmoothedMetrics::new(thresholds.ema_alpha),
             thresholds,
@@ -147,17 +149,19 @@ impl AdaptiveController {
             consecutive_step_downs: 0,
             current_recovery_delay: recovery_delay,
             current_bitrate: initial_bitrate,
-        }
+        })
     }
 
     /// Create a new adaptive controller with custom thresholds
-    pub fn with_thresholds(config: &AdaptiveConfig, thresholds: Thresholds) -> Self {
+    ///
+    /// Returns None if no valid quality ladder could be generated from the config.
+    pub fn with_thresholds(config: &AdaptiveConfig, thresholds: Thresholds) -> Option<Self> {
         let floors = BitrateFloors::load_embedded();
-        let ladder = QualityLadder::new(config, &floors);
+        let ladder = QualityLadder::new(config, &floors)?;
         let initial_bitrate = config.target_bitrate;
         let recovery_delay = thresholds.recovery_delay;
 
-        Self {
+        Some(Self {
             ladder,
             metrics: SmoothedMetrics::new(thresholds.ema_alpha),
             thresholds,
@@ -167,7 +171,7 @@ impl AdaptiveController {
             consecutive_step_downs: 0,
             current_recovery_delay: recovery_delay,
             current_bitrate: initial_bitrate,
-        }
+        })
     }
 
     /// Process new metrics and return any quality change action
@@ -381,7 +385,8 @@ mod tests {
     #[test]
     fn test_step_down_on_loss() {
         let config = test_config();
-        let mut controller = AdaptiveController::with_thresholds(&config, fast_thresholds());
+        let mut controller = AdaptiveController::with_thresholds(&config, fast_thresholds())
+            .expect("controller should be created");
 
         // Simulate high packet loss - keep calling until we get a step down
         let mut result = None;
@@ -405,7 +410,8 @@ mod tests {
     #[test]
     fn test_cooldown_prevents_rapid_changes() {
         let config = test_config();
-        let mut controller = AdaptiveController::with_thresholds(&config, fast_thresholds());
+        let mut controller = AdaptiveController::with_thresholds(&config, fast_thresholds())
+            .expect("controller should be created");
 
         // Simulate high loss until we get a step down
         let mut result1 = None;
@@ -429,7 +435,8 @@ mod tests {
     #[test]
     fn test_step_up_after_recovery() {
         let config = test_config();
-        let mut controller = AdaptiveController::with_thresholds(&config, fast_thresholds());
+        let mut controller = AdaptiveController::with_thresholds(&config, fast_thresholds())
+            .expect("controller should be created");
 
         // Step down first
         let mut step_down = None;
