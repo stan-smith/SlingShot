@@ -105,12 +105,15 @@ impl Default for StreamParams {
 
 /// Shared state for dynamic pipeline control
 struct PipelineState {
+    pipeline: Option<gstreamer::Pipeline>,
     capsfilter: Option<gstreamer::Element>,
     encoder: Option<gstreamer::Element>,
     videorate: Option<gstreamer::Element>,
     params: StreamParams,
     /// Detected source framerate (set when pipeline negotiates)
     source_framerate: Option<i32>,
+    /// Flag to request pipeline restart from command handler
+    restart_requested: bool,
 }
 
 /// Connection state for managing heartbeat and reconnection
@@ -201,6 +204,187 @@ fn cli_source_to_config(source: &Source) -> SourceConfig {
             SourceConfig::Onvif(OnvifConfig::new(ip.clone(), user.clone(), pass))
         }
     }
+}
+
+/// Result of building a video pipeline
+struct VideoPipeline {
+    pipeline: gstreamer::Pipeline,
+    capsfilter: gstreamer::Element,
+    encoder: gstreamer::Element,
+    videorate: gstreamer::Element,
+}
+
+/// Build the video pipeline from RTSP source to appsink
+fn build_video_pipeline(
+    rtsp_url: &str,
+    params: &StreamParams,
+    frame_tx: mpsc::Sender<quic_video::VideoFrame>,
+    frame_sequence: Arc<std::sync::atomic::AtomicU32>,
+) -> Result<VideoPipeline> {
+    let pipeline = gstreamer::Pipeline::new();
+
+    let src = gstreamer::ElementFactory::make("rtspsrc")
+        .property("location", rtsp_url)
+        .property("latency", 100u32)
+        .build()?;
+
+    let depay = gstreamer::ElementFactory::make("rtph264depay").build()?;
+    let decode = gstreamer::ElementFactory::make("avdec_h264").build()?;
+    let convert = gstreamer::ElementFactory::make("videoconvert").build()?;
+    let scale = gstreamer::ElementFactory::make("videoscale").build()?;
+    let rate = gstreamer::ElementFactory::make("videorate")
+        .property("drop-only", true)
+        .property("skip-to-first", true)
+        .build()?;
+
+    // Build caps - include framerate if set
+    let caps = if let Some(fps) = params.framerate {
+        gstreamer::Caps::builder("video/x-raw")
+            .field("width", params.width)
+            .field("height", params.height)
+            .field("framerate", gstreamer::Fraction::new(fps, 1))
+            .build()
+    } else {
+        gstreamer::Caps::builder("video/x-raw")
+            .field("width", params.width)
+            .field("height", params.height)
+            .build()
+    };
+
+    let capsfilter = gstreamer::ElementFactory::make("capsfilter")
+        .name("caps")
+        .property("caps", &caps)
+        .build()?;
+
+    let encoder = gstreamer::ElementFactory::make("x264enc")
+        .name("encoder")
+        .property("bitrate", params.bitrate)
+        .property_from_str("tune", "zerolatency")
+        .property_from_str("speed-preset", "ultrafast")
+        .property("key-int-max", 30u32)
+        .build()?;
+
+    let parser = gstreamer::ElementFactory::make("h264parse").build()?;
+
+    let appsink = gstreamer::ElementFactory::make("appsink")
+        .name("videosink")
+        .build()?
+        .dynamic_cast::<AppSink>()
+        .unwrap();
+
+    appsink.set_sync(false);
+    appsink.set_max_buffers(30);
+    appsink.set_drop(false);
+    appsink.set_caps(Some(
+        &gstreamer::Caps::builder("video/x-h264")
+            .field("stream-format", "byte-stream")
+            .field("alignment", "au")
+            .build(),
+    ));
+
+    // Add elements to pipeline
+    pipeline.add_many([
+        &src,
+        &depay,
+        &decode,
+        &convert,
+        &scale,
+        &rate,
+        &capsfilter,
+        &encoder,
+        &parser,
+        appsink.upcast_ref(),
+    ])?;
+
+    // Link static elements
+    gstreamer::Element::link_many([
+        &depay,
+        &decode,
+        &convert,
+        &scale,
+        &rate,
+        &capsfilter,
+        &encoder,
+        &parser,
+        appsink.upcast_ref(),
+    ])?;
+
+    // Handle dynamic pad from rtspsrc
+    let depay_weak = depay.downgrade();
+    src.connect_pad_added(move |_src, src_pad| {
+        let Some(depay) = depay_weak.upgrade() else {
+            return;
+        };
+        let sink_pad = depay.static_pad("sink").unwrap();
+        if sink_pad.is_linked() {
+            return;
+        }
+        if let Err(e) = src_pad.link(&sink_pad) {
+            eprintln!("Failed to link rtspsrc pad: {:?}", e);
+        }
+    });
+
+    // Set up appsink callback
+    let frame_tx_clone = frame_tx.clone();
+    let frame_sequence_clone = frame_sequence.clone();
+    appsink.set_callbacks(
+        gstreamer_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let sample = sink.pull_sample().map_err(|_| gstreamer::FlowError::Error)?;
+                let buffer = sample.buffer().ok_or(gstreamer::FlowError::Error)?;
+                let map = buffer.map_readable().map_err(|_| gstreamer::FlowError::Error)?;
+
+                let pts = buffer.pts().map(|t| t.nseconds() / 11111).unwrap_or(0);
+                let is_keyframe = !buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT);
+
+                let seq = frame_sequence_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let frame = quic_video::VideoFrame::new(seq, pts, is_keyframe, map.as_slice().to_vec());
+
+                let _ = frame_tx_clone.blocking_send(frame);
+                Ok(gstreamer::FlowSuccess::Ok)
+            })
+            .build(),
+    );
+
+    Ok(VideoPipeline {
+        pipeline,
+        capsfilter,
+        encoder,
+        videorate: rate,
+    })
+}
+
+/// Check pipeline bus for errors. Returns Some(error_message) if pipeline has failed.
+fn check_pipeline_bus(pipeline: &gstreamer::Pipeline) -> Option<String> {
+    let bus = pipeline.bus()?;
+
+    // Non-blocking check for error messages
+    while let Some(msg) = bus.pop() {
+        use gstreamer::MessageView;
+        match msg.view() {
+            MessageView::Error(err) => {
+                let error_msg = format!(
+                    "Pipeline error from {:?}: {} ({:?})",
+                    err.src().map(|s| s.path_string()),
+                    err.error(),
+                    err.debug()
+                );
+                return Some(error_msg);
+            }
+            MessageView::Eos(_) => {
+                return Some("Pipeline reached end-of-stream".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    // Also check pipeline state
+    let (_, current, _) = pipeline.state(gstreamer::ClockTime::from_mseconds(0));
+    if current == gstreamer::State::Null {
+        return Some("Pipeline in NULL state".to_string());
+    }
+
+    None
 }
 
 async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) -> Result<()> {
@@ -440,11 +624,13 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
 
     // Create shared pipeline state for dynamic control
     let pipeline_state = Arc::new(Mutex::new(PipelineState {
+        pipeline: None,
         capsfilter: None,
         encoder: None,
         videorate: None,
         params: StreamParams::default(),
         source_framerate: None,
+        restart_requested: false,
     }));
 
     // Initialize adaptive bitrate controller if enabled
@@ -497,108 +683,8 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
     // Create channel for video frames (will be sent over QUIC)
     let (frame_tx, mut frame_rx) = mpsc::channel::<quic_video::VideoFrame>(30);
 
-    // Create GStreamer pipeline with appsink (video goes over QUIC, not local RTSP)
-    let gst_pipeline = gstreamer::Pipeline::new();
-    let params = pipeline_state.lock().unwrap().params.clone();
-
-    let src = gstreamer::ElementFactory::make("rtspsrc")
-        .property("location", &camera_rtsp_url)
-        .property("latency", 100u32)
-        .build()?;
-
-    let depay = gstreamer::ElementFactory::make("rtph264depay").build()?;
-    let decode = gstreamer::ElementFactory::make("avdec_h264").build()?;
-    let convert = gstreamer::ElementFactory::make("videoconvert").build()?;
-    let scale = gstreamer::ElementFactory::make("videoscale").build()?;
-    // Configure videorate to only drop frames, never duplicate (prevents buffering)
-    let rate = gstreamer::ElementFactory::make("videorate")
-        .property("drop-only", true)
-        .property("skip-to-first", true)
-        .build()?;
-
-    // Capsfilter: set resolution only, let framerate pass through from source
-    // User can reduce framerate later but not increase above source
-    let capsfilter = gstreamer::ElementFactory::make("capsfilter")
-        .name("caps")
-        .property(
-            "caps",
-            gstreamer::Caps::builder("video/x-raw")
-                .field("width", params.width)
-                .field("height", params.height)
-                // No framerate field = passthrough from source
-                .build(),
-        )
-        .build()?;
-
-    let encoder = gstreamer::ElementFactory::make("x264enc")
-        .name("encoder")
-        .property("bitrate", params.bitrate)
-        .property_from_str("tune", "zerolatency")
-        .property_from_str("speed-preset", "ultrafast")
-        .property("key-int-max", 30u32)
-        .build()?;
-
-    let parser = gstreamer::ElementFactory::make("h264parse").build()?;
-
-    let appsink = gstreamer::ElementFactory::make("appsink")
-        .name("videosink")
-        .build()?
-        .dynamic_cast::<AppSink>()
-        .unwrap();
-
-    // Configure appsink - never drop frames, let backpressure flow
-    // H.264 decoder can't handle gaps, so dropping frames causes decode errors
-    appsink.set_sync(false);
-    appsink.set_max_buffers(30);  // ~1 second buffer at 30fps
-    appsink.set_drop(false);      // NEVER drop - backpressure will naturally slow encoder
-    appsink.set_caps(Some(
-        &gstreamer::Caps::builder("video/x-h264")
-            .field("stream-format", "byte-stream")
-            .field("alignment", "au")
-            .build(),
-    ));
-
-    // Add elements to pipeline
-    gst_pipeline.add_many([
-        &src,
-        &depay,
-        &decode,
-        &convert,
-        &scale,
-        &rate,
-        &capsfilter,
-        &encoder,
-        &parser,
-        appsink.upcast_ref(),
-    ])?;
-
-    // Link static elements (depay onwards)
-    gstreamer::Element::link_many([
-        &depay,
-        &decode,
-        &convert,
-        &scale,
-        &rate,
-        &capsfilter,
-        &encoder,
-        &parser,
-        appsink.upcast_ref(),
-    ])?;
-
-    // Handle dynamic pad from rtspsrc
-    let depay_weak = depay.downgrade();
-    src.connect_pad_added(move |_src, src_pad| {
-        let Some(depay) = depay_weak.upgrade() else {
-            return;
-        };
-        let sink_pad = depay.static_pad("sink").unwrap();
-        if sink_pad.is_linked() {
-            return;
-        }
-        if let Err(e) = src_pad.link(&sink_pad) {
-            eprintln!("Failed to link rtspsrc pad: {:?}", e);
-        }
-    });
+    // Frame sequence counter (shared across pipeline rebuilds)
+    let frame_sequence = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
     // Detect source framerate using ffprobe (more reliable than GStreamer caps)
     {
@@ -614,46 +700,31 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
         }
     }
 
-    // Store element references for dynamic control
+    // Build initial video pipeline
+    let params = pipeline_state.lock().unwrap().params.clone();
+    let video_pipeline = build_video_pipeline(
+        &camera_rtsp_url,
+        &params,
+        frame_tx.clone(),
+        frame_sequence.clone(),
+    )?;
+
+    // Store pipeline and element references for dynamic control
     {
         let mut state = pipeline_state.lock().unwrap();
-        state.capsfilter = Some(capsfilter.clone());
-        state.encoder = Some(encoder.clone());
-        state.videorate = Some(rate.clone());
+        state.pipeline = Some(video_pipeline.pipeline.clone());
+        state.capsfilter = Some(video_pipeline.capsfilter.clone());
+        state.encoder = Some(video_pipeline.encoder.clone());
+        state.videorate = Some(video_pipeline.videorate.clone());
     }
 
-    // Set up appsink callback to send frames to channel
-    let frame_tx_clone = frame_tx.clone();
-    let frame_sequence = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let frame_sequence_clone = frame_sequence.clone();
-    appsink.set_callbacks(
-        gstreamer_app::AppSinkCallbacks::builder()
-            .new_sample(move |sink| {
-                let sample = sink.pull_sample().map_err(|_| gstreamer::FlowError::Error)?;
-                let buffer = sample.buffer().ok_or(gstreamer::FlowError::Error)?;
-                let map = buffer.map_readable().map_err(|_| gstreamer::FlowError::Error)?;
-
-                // Convert nanoseconds to 90kHz RTP clock
-                let pts = buffer.pts().map(|t| t.nseconds() / 11111).unwrap_or(0);
-                let is_keyframe = !buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT);
-
-                // Get next sequence number
-                let seq = frame_sequence_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let frame = quic_video::VideoFrame::new(seq, pts, is_keyframe, map.as_slice().to_vec());
-
-                // IMPORTANT: Never drop frames - decoder can't handle gaps in frame sequence
-                // If QUIC can't keep up, backpressure will naturally slow down the pipeline
-                let _ = frame_tx_clone.blocking_send(frame);
-
-                Ok(gstreamer::FlowSuccess::Ok)
-            })
-            .build(),
-    );
-
     // Start the pipeline
-    gst_pipeline.set_state(gstreamer::State::Playing)?;
+    video_pipeline.pipeline.set_state(gstreamer::State::Playing)?;
     println!("Video pipeline started (camera → QUIC)");
     println!();
+
+    // Store camera URL for pipeline rebuilds
+    let camera_rtsp_url_for_rebuild = camera_rtsp_url.clone();
 
     // Start recorder now (after GLib is set up, before central connection)
     // This ensures recording works even if central connection fails
@@ -960,6 +1031,64 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                             quic_metrics::log_stats(&connection, &config.node_name);
                         }
 
+                        // Check pipeline health and rebuild if needed
+                        {
+                            let mut state = pipeline_state.lock().unwrap();
+
+                            // Check for manual restart request first
+                            let manual_restart = state.restart_requested;
+                            if manual_restart {
+                                state.restart_requested = false;
+                            }
+
+                            // Check for pipeline errors
+                            let error_restart = state.pipeline.as_ref()
+                                .map(|p| check_pipeline_bus(p).is_some())
+                                .unwrap_or(false);
+
+                            if manual_restart || error_restart {
+                                if manual_restart {
+                                    println!("[Pipeline] Manual restart requested");
+                                } else {
+                                    eprintln!("[Pipeline] Error detected, rebuilding...");
+                                }
+
+                                // Teardown: set to NULL and drop references
+                                if let Some(ref pipeline) = state.pipeline {
+                                    let _ = pipeline.set_state(gstreamer::State::Null);
+                                }
+                                state.pipeline = None;
+                                state.capsfilter = None;
+                                state.encoder = None;
+                                state.videorate = None;
+
+                                // Rebuild pipeline
+                                match build_video_pipeline(
+                                    &camera_rtsp_url_for_rebuild,
+                                    &state.params,
+                                    frame_tx.clone(),
+                                    frame_sequence.clone(),
+                                ) {
+                                    Ok(new_pipeline) => {
+                                        // Start new pipeline
+                                        if let Err(e) = new_pipeline.pipeline.set_state(gstreamer::State::Playing) {
+                                            eprintln!("[Pipeline] Failed to start rebuilt pipeline: {}", e);
+                                        } else {
+                                            // Store new references
+                                            state.pipeline = Some(new_pipeline.pipeline);
+                                            state.capsfilter = Some(new_pipeline.capsfilter);
+                                            state.encoder = Some(new_pipeline.encoder);
+                                            state.videorate = Some(new_pipeline.videorate);
+                                            println!("[Pipeline] Successfully rebuilt and restarted");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[Pipeline] Failed to rebuild: {}", e);
+                                    }
+                                }
+                            }
+                        }
+
                         // Adaptive bitrate control - process QUIC metrics
                         if let Some(ref controller) = adaptive_controller {
                             let stats = connection.stats();
@@ -1159,7 +1288,12 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
     }
 
     // Stop GStreamer pipeline
-    gst_pipeline.set_state(gstreamer::State::Null)?;
+    {
+        let state = pipeline_state.lock().unwrap();
+        if let Some(ref pipeline) = state.pipeline {
+            let _ = pipeline.set_state(gstreamer::State::Null);
+        }
+    }
     Ok(())
 }
 
@@ -1268,6 +1402,12 @@ fn handle_command(
                 "Stream: {}x{} @ {} fps, {} kbps",
                 state.params.width, state.params.height, fps_str, state.params.bitrate
             ))
+        }
+
+        "restart" | "reset" => {
+            let mut state = pipeline_state.lock().unwrap();
+            state.restart_requested = true;
+            Ok("Pipeline restart requested".to_string())
         }
 
         // PTZ and camera commands need the ONVIF client
