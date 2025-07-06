@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>SlingShot Admin</title>
+<style>
+:root {
+  --bg-primary: #1a1a1a;
+  --bg-secondary: #252525;
+  --bg-tertiary: #2d2d2d;
+  --text-primary: #0f0;
+  --text-secondary: #0a0;
+  --text-muted: #666;
+  --accent-yellow: #ff0;
+  --accent-red: #f00;
+  --accent-cyan: #0ff;
+  --border-color: #333;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+.app {
+  display: grid;
+  grid-template-rows: 50px minmax(0, 1fr) 45px;
+  grid-template-columns: 220px 1fr 280px;
+  height: 100vh;
+  max-height: 100vh;
+}
+/* Header */
+.header {
+  grid-column: 1 / -1;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+}
+.header h1 { font-size: 16px; font-weight: normal; }
+.status { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent-red);
+}
+.status-dot.connected { background: var(--text-primary); box-shadow: 0 0 6px var(--text-primary); }
+/* Panels */
+.nodes-panel {
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-color);
+  overflow-y: auto;
+  padding: 12px;
+  min-height: 0;
+}
+.control-panel {
+  background: var(--bg-tertiary);
+  overflow-y: auto;
+  padding: 16px;
+  min-height: 0;
+}
+.log-panel {
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+/* Command bar */
+.command-bar {
+  grid-column: 1 / -1;
+  background: var(--bg-primary);
+  border-top: 1px solid var(--border-color);
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.command-bar span { color: var(--text-muted); }
+#cmd {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+}
+/* Section headers */
+.section-header {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-color);
+}
+/* Node cards */
+.node-card {
+  display: flex;
+  align-items: center;
+  padding: 8px;
+  margin: 4px 0;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.node-card:hover { background: rgba(0,255,0,0.1); }
+.node-card.selected { background: rgba(0,255,0,0.15); border-left: 2px solid var(--text-primary); }
+.node-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 8px;
+  background: var(--text-primary);
+}
+.node-card.pending .node-dot { background: var(--accent-yellow); }
+.node-actions { margin-left: auto; display: flex; gap: 4px; }
+.no-items { color: var(--text-muted); font-size: 11px; padding: 8px; }
+/* Buttons */
+button {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  padding: 4px 8px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  border-radius: 3px;
+}
+button:hover { background: rgba(0,255,0,0.1); border-color: var(--text-primary); }
+button.approve { border-color: var(--text-primary); }
+button.reject { border-color: var(--accent-red); color: var(--accent-red); }
+/* Tabs */
+.tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 16px;
+}
+.tab {
+  padding: 8px 16px;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+  font-size: 12px;
+}
+.tab:hover { color: var(--text-secondary); }
+.tab.active { color: var(--text-primary); border-bottom-color: var(--text-primary); }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+/* Control sections */
+.control-section {
+  margin-bottom: 20px;
+}
+.control-section h3 {
+  font-size: 12px;
+  font-weight: normal;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+.preset-buttons {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.preset-buttons button {
+  min-width: 60px;
+}
+.custom-input {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.custom-input input {
+  width: 70px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 4px 8px;
+  font-family: inherit;
+  font-size: 11px;
+}
+/* PTZ Controls */
+.ptz-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+.ptz-settings {
+  display: flex;
+  gap: 20px;
+  width: 100%;
+  justify-content: center;
+}
+.ptz-setting {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ptz-setting label {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.ptz-setting select, .ptz-setting input {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 4px 8px;
+  font-family: inherit;
+  font-size: 11px;
+}
+.dpad {
+  display: grid;
+  grid-template-columns: repeat(3, 50px);
+  grid-template-rows: repeat(3, 50px);
+  gap: 4px;
+}
+.dpad button {
+  width: 50px;
+  height: 50px;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.dpad-center { background: var(--bg-primary); }
+.zoom-buttons {
+  display: flex;
+  gap: 8px;
+}
+.zoom-buttons button {
+  padding: 8px 16px;
+}
+.ptz-actions {
+  display: flex;
+  gap: 8px;
+}
+/* Recording */
+.quick-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.date-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.date-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.date-row label {
+  width: 40px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.date-row input {
+  flex: 1;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 4px 8px;
+  font-family: inherit;
+  font-size: 11px;
+}
+/* Placeholder */
+.placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+/* Log */
+.log-header {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+}
+.log-controls { display: flex; gap: 8px; align-items: center; }
+.log-controls select {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  font-size: 10px;
+  padding: 2px 4px;
+}
+#log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+.log-line { padding: 2px 0; }
+.pending { color: var(--accent-yellow); }
+.approved { color: var(--text-primary); }
+.rejected { color: var(--accent-red); }
+.response { color: var(--accent-cyan); }
+.command { color: var(--text-muted); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <h1>SlingShot Admin</h1>
+    <div class="status">
+      <div class="status-dot" id="status-dot"></div>
+      <span id="status-text">Disconnected</span>
+    </div>
+  </header>
+
+  <aside class="nodes-panel">
+    <div class="section-header">Connected Nodes</div>
+    <div id="connected-nodes"><div class="no-items">No nodes connected</div></div>
+    <div class="section-header" style="margin-top:16px">Pending Approval</div>
+    <div id="pending-nodes"><div class="no-items">No pending nodes</div></div>
+  </aside>
+
+  <main class="control-panel">
+    <div class="tabs">
+      <button class="tab active" data-tab="stream">Stream</button>
+      <button class="tab" data-tab="ptz">PTZ</button>
+      <button class="tab" data-tab="recording">Recording</button>
+    </div>
+    <div id="no-node-selected" class="placeholder">Select a node to control</div>
+    <div id="control-content" style="display:none">
+      <!-- Stream Tab -->
+      <div id="tab-stream" class="tab-content active">
+        <div class="control-section">
+          <h3>Resolution</h3>
+          <div class="preset-buttons">
+            <button onclick="setResolution(1920, 1080)">1080p</button>
+            <button onclick="setResolution(1280, 720)">720p</button>
+            <button onclick="setResolution(1024, 576)">576p</button>
+            <button onclick="setResolution(854, 480)">480p</button>
+            <button onclick="setResolution(640, 360)">360p</button>
+            <button onclick="setResolution(426, 240)">240p</button>
+          </div>
+          <div class="custom-input">
+            <input type="number" id="res-w" placeholder="W" value="1280">
+            <span>x</span>
+            <input type="number" id="res-h" placeholder="H" value="720">
+            <button onclick="setCustomResolution()">Set</button>
+          </div>
+        </div>
+        <div class="control-section">
+          <h3>Bitrate (kbps)</h3>
+          <div class="custom-input">
+            <input type="number" id="bitrate" placeholder="kbps" value="2000" min="100" max="20000" style="width:100px">
+            <button onclick="setBitrate()">Set</button>
+          </div>
+        </div>
+        <div class="control-section">
+          <h3>Frame Rate</h3>
+          <div class="preset-buttons">
+            <button onclick="setFps(30)">30</button>
+            <button onclick="setFps(25)">25</button>
+            <button onclick="setFps(15)">15</button>
+            <button onclick="setFps(10)">10</button>
+          </div>
+        </div>
+        <button onclick="getParams()" style="width:100%;margin-top:10px">Refresh Parameters</button>
+        <button onclick="restartPipeline()" style="width:100%;margin-top:8px;border-color:var(--accent-yellow);color:var(--accent-yellow)">Restart Pipeline</button>
+      </div>
+
+      <!-- PTZ Tab -->
+      <div id="tab-ptz" class="tab-content">
+        <div class="ptz-container">
+          <div class="ptz-settings">
+            <div class="ptz-setting">
+              <label>Speed</label>
+              <input type="range" id="ptz-speed" min="0.1" max="1" step="0.1" value="0.5" style="width:80px">
+            </div>
+            <div class="ptz-setting">
+              <label>Duration</label>
+              <select id="ptz-duration">
+                <option value="0">Hold</option>
+                <option value="250">250ms</option>
+                <option value="500" selected>500ms</option>
+                <option value="1000">1s</option>
+              </select>
+            </div>
+          </div>
+          <div class="dpad">
+            <div></div>
+            <button onmousedown="ptzMove('up')" onmouseup="ptzStop()" onmouseleave="ptzStop()">&#9650;</button>
+            <div></div>
+            <button onmousedown="ptzMove('left')" onmouseup="ptzStop()" onmouseleave="ptzStop()">&#9664;</button>
+            <button class="dpad-center" onclick="ptzHome()">&#8962;</button>
+            <button onmousedown="ptzMove('right')" onmouseup="ptzStop()" onmouseleave="ptzStop()">&#9654;</button>
+            <div></div>
+            <button onmousedown="ptzMove('down')" onmouseup="ptzStop()" onmouseleave="ptzStop()">&#9660;</button>
+            <div></div>
+          </div>
+          <div class="zoom-buttons">
+            <button onmousedown="ptzMove('zoomout')" onmouseup="ptzStop()" onmouseleave="ptzStop()">- Zoom</button>
+            <button onmousedown="ptzMove('zoomin')" onmouseup="ptzStop()" onmouseleave="ptzStop()">Zoom +</button>
+          </div>
+          <div class="ptz-actions">
+            <button onclick="ptzStop()">Stop</button>
+            <button onclick="ptzStatus()">Status</button>
+            <button onclick="ptzInfo()">Info</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recording Tab -->
+      <div id="tab-recording" class="tab-content">
+        <div class="control-section">
+          <h3>Quick Select</h3>
+          <div class="quick-buttons">
+            <button onclick="getRecordings('5 mins ago')">5 min</button>
+            <button onclick="getRecordings('15 mins ago')">15 min</button>
+            <button onclick="getRecordings('last hour')">1 hour</button>
+            <button onclick="getRecordings('2 hours ago')">2 hours</button>
+            <button onclick="getRecordings('since midnight')">Today</button>
+            <button onclick="getRecordings('since yesterday')">Yesterday</button>
+          </div>
+        </div>
+        <div class="control-section">
+          <h3>Custom Range</h3>
+          <div class="date-inputs">
+            <div class="date-row">
+              <label>From:</label>
+              <input type="datetime-local" id="rec-from">
+            </div>
+            <div class="date-row">
+              <label>To:</label>
+              <input type="datetime-local" id="rec-to">
+            </div>
+          </div>
+          <button onclick="getCustomRecordings()">Retrieve</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <aside class="log-panel">
+    <div class="log-header">
+      <span>Activity Log</span>
+      <div class="log-controls">
+        <select id="log-filter">
+          <option value="all">All</option>
+          <option value="approval">Approvals</option>
+          <option value="command">Commands</option>
+          <option value="response">Responses</option>
+        </select>
+        <button onclick="clearLog()">Clear</button>
+      </div>
+    </div>
+    <div id="log"></div>
+  </aside>
+
+  <div class="command-bar">
+    <span>&gt;</span>
+    <input id="cmd" placeholder="Enter command (help for list)" autofocus>
+  </div>
+</div>
+
+<script>
+// State
+let ws = null;
+let selectedNode = null;
+let connectedNodes = new Map();
+let pendingNodes = new Map();
+let commandHistory = [];
+let historyIndex = -1;
+let ptzContinuous = false;
+
+// DOM elements
+const log = document.getElementById('log');
+const cmd = document.getElementById('cmd');
+const statusDot = document.getElementById('status-dot');
+const statusText = document.getElementById('status-text');
+
+// Initialize
+connectWebSocket();
+setupTabs();
+
+function connectWebSocket() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => {
+    statusDot.classList.add('connected');
+    statusText.textContent = 'Connected';
+    append('--- Connected ---', 'system');
+    ws.send('nodes');
+  };
+  ws.onclose = () => {
+    statusDot.classList.remove('connected');
+    statusText.textContent = 'Disconnected';
+    append('--- Disconnected ---', 'system');
+    setTimeout(connectWebSocket, 3000);
+  };
+  ws.onerror = () => append('--- Error ---', 'error');
+  ws.onmessage = handleMessage;
+}
+
+function handleMessage(e) {
+  const msg = e.data;
+  if (msg.startsWith('PENDING|')) {
+    const [_, name, fp, addr] = msg.split('|');
+    pendingNodes.set(name, { fingerprint: fp, address: addr });
+    updatePendingList();
+    append(`[PENDING] ${name} (${fp}) from ${addr}`, 'pending');
+  } else if (msg.startsWith('APPROVED|')) {
+    const name = msg.split('|')[1];
+    pendingNodes.delete(name);
+    updatePendingList();
+    append(`[APPROVED] ${name}`, 'approved');
+  } else if (msg.startsWith('REJECTED|')) {
+    const name = msg.split('|')[1];
+    pendingNodes.delete(name);
+    updatePendingList();
+    append(`[REJECTED] ${name}`, 'rejected');
+  } else if (msg.startsWith('CONNECTED|')) {
+    const name = msg.split('|')[1];
+    connectedNodes.set(name, { status: 'connected' });
+    updateNodeList();
+    append(`[CONNECTED] ${name}`, 'approved');
+  } else if (msg.startsWith('DISCONNECTED|')) {
+    const name = msg.split('|')[1];
+    connectedNodes.delete(name);
+    if (selectedNode === name) { selectedNode = null; updateControlPanel(); }
+    updateNodeList();
+    append(`[DISCONNECTED] ${name}`, 'rejected');
+  } else if (msg.startsWith('Connected nodes:')) {
+    parseNodesList(msg);
+  } else if (msg.startsWith('[')) {
+    append(msg, 'response');
+  } else {
+    append(msg);
+  }
+}
+
+function parseNodesList(msg) {
+  const lines = msg.split('\n');
+  connectedNodes.clear();
+  for (const line of lines) {
+    // Format: "  nodename - address (fingerprint)"
+    const match = line.match(/^\s+(\S+)\s+-\s+/);
+    if (match) connectedNodes.set(match[1], { status: 'connected' });
+  }
+  updateNodeList();
+}
+
+function sendCommand(cmdStr) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    append('> ' + cmdStr, 'command');
+    ws.send(cmdStr);
+    commandHistory.push(cmdStr);
+    historyIndex = commandHistory.length;
+  }
+}
+
+// Node management
+function selectNode(name) {
+  selectedNode = name;
+  updateNodeList();
+  updateControlPanel();
+  sendCommand(`${name} params`);
+}
+
+function approveNode(name) { sendCommand(`approve ${name}`); }
+function rejectNode(name) { sendCommand(`reject ${name}`); }
+
+function updateNodeList() {
+  const container = document.getElementById('connected-nodes');
+  if (connectedNodes.size === 0) {
+    container.innerHTML = '<div class="no-items">No nodes connected</div>';
+    return;
+  }
+  container.innerHTML = '';
+  connectedNodes.forEach((info, name) => {
+    const card = document.createElement('div');
+    card.className = 'node-card' + (selectedNode === name ? ' selected' : '');
+    card.innerHTML = `<div class="node-dot"></div><span>${name}</span>`;
+    card.onclick = () => selectNode(name);
+    container.appendChild(card);
+  });
+}
+
+function updatePendingList() {
+  const container = document.getElementById('pending-nodes');
+  if (pendingNodes.size === 0) {
+    container.innerHTML = '<div class="no-items">No pending nodes</div>';
+    return;
+  }
+  container.innerHTML = '';
+  pendingNodes.forEach((info, name) => {
+    const card = document.createElement('div');
+    card.className = 'node-card pending';
+    card.innerHTML = `
+      <div class="node-dot"></div>
+      <span>${name}</span>
+      <div class="node-actions">
+        <button class="approve" onclick="event.stopPropagation();approveNode('${name}')">Approve</button>
+        <button class="reject" onclick="event.stopPropagation();rejectNode('${name}')">Reject</button>
+      </div>`;
+    container.appendChild(card);
+  });
+}
+
+function updateControlPanel() {
+  const content = document.getElementById('control-content');
+  const placeholder = document.getElementById('no-node-selected');
+  if (selectedNode) {
+    content.style.display = 'block';
+    placeholder.style.display = 'none';
+  } else {
+    content.style.display = 'none';
+    placeholder.style.display = 'flex';
+  }
+}
+
+// Tabs
+function setupTabs() {
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.onclick = () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+    };
+  });
+}
+
+// Stream controls
+function setResolution(w, h) {
+  if (selectedNode) sendCommand(`${selectedNode} res ${w} ${h}`);
+}
+function setCustomResolution() {
+  const w = document.getElementById('res-w').value;
+  const h = document.getElementById('res-h').value;
+  if (selectedNode && w && h) sendCommand(`${selectedNode} res ${w} ${h}`);
+}
+function setBitrate() {
+  const bitrate = document.getElementById('bitrate').value;
+  if (selectedNode && bitrate) sendCommand(`${selectedNode} bitrate ${bitrate}`);
+}
+function setFps(rate) {
+  if (selectedNode) sendCommand(`${selectedNode} fps ${rate}`);
+}
+function getParams() {
+  if (selectedNode) sendCommand(`${selectedNode} params`);
+}
+function restartPipeline() {
+  if (selectedNode) sendCommand(`${selectedNode} restart`);
+}
+
+// PTZ controls
+function ptzMove(direction) {
+  if (!selectedNode) return;
+  const speed = document.getElementById('ptz-speed').value;
+  const duration = document.getElementById('ptz-duration').value;
+  if (duration === '0') {
+    ptzContinuous = true;
+    sendCommand(`${selectedNode} ${direction} ${speed}`);
+  } else {
+    sendCommand(`${selectedNode} ${direction} ${speed} ${duration}`);
+  }
+}
+function ptzStop() {
+  if (ptzContinuous && selectedNode) {
+    sendCommand(`${selectedNode} stop`);
+    ptzContinuous = false;
+  }
+}
+function ptzHome() { if (selectedNode) sendCommand(`${selectedNode} home`); }
+function ptzStatus() { if (selectedNode) sendCommand(`${selectedNode} status`); }
+function ptzInfo() { if (selectedNode) sendCommand(`${selectedNode} info`); }
+
+// Recording controls
+function getRecordings(timeSpec) {
+  if (selectedNode) sendCommand(`${selectedNode} recordings ${timeSpec}`);
+}
+function getCustomRecordings() {
+  const from = document.getElementById('rec-from').value;
+  const to = document.getElementById('rec-to').value;
+  if (selectedNode && from && to) {
+    sendCommand(`${selectedNode} recordings ${new Date(from).toISOString()} ${new Date(to).toISOString()}`);
+  }
+}
+
+// Log
+function append(text, cls) {
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  line.textContent = text;
+  if (cls) line.classList.add(cls);
+  line.dataset.type = getMessageType(text, cls);
+  log.appendChild(line);
+  applyFilter(line);
+  log.scrollTop = log.scrollHeight;
+}
+
+function getMessageType(text, cls) {
+  if (cls === 'pending' || cls === 'approved' || cls === 'rejected') return 'approval';
+  if (cls === 'command') return 'command';
+  if (cls === 'response') return 'response';
+  return 'info';
+}
+
+function applyFilter(line) {
+  const filter = document.getElementById('log-filter').value;
+  line.style.display = (filter === 'all' || line.dataset.type === filter) ? '' : 'none';
+}
+
+document.getElementById('log-filter').onchange = () => {
+  document.querySelectorAll('.log-line').forEach(applyFilter);
+};
+
+function clearLog() { log.innerHTML = ''; }
+
+// Command input
+cmd.onkeydown = (e) => {
+  if (e.key === 'Enter' && cmd.value.trim()) {
+    sendCommand(cmd.value.trim());
+    cmd.value = '';
+  } else if (e.key === 'ArrowUp') {
+    if (historyIndex > 0) { historyIndex--; cmd.value = commandHistory[historyIndex]; }
+    e.preventDefault();
+  } else if (e.key === 'ArrowDown') {
+    if (historyIndex < commandHistory.length - 1) { historyIndex++; cmd.value = commandHistory[historyIndex]; }
+    else { historyIndex = commandHistory.length; cmd.value = ''; }
+    e.preventDefault();
+  }
+};
+</script>
+</body>
+</html>
