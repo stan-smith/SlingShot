@@ -114,7 +114,12 @@ struct PipelineState {
     source_framerate: Option<i32>,
     /// Flag to request pipeline restart from command handler
     restart_requested: bool,
+    /// When pipeline was last started (for grace period)
+    pipeline_started_at: Option<Instant>,
 }
+
+/// Grace period after pipeline start before checking for errors (seconds)
+const PIPELINE_GRACE_PERIOD_SECS: u64 = 10;
 
 /// Connection state for managing heartbeat and reconnection
 struct ConnectionState {
@@ -237,24 +242,22 @@ fn build_video_pipeline(
         .property("skip-to-first", true)
         .build()?;
 
-    // Build caps - include framerate if set
-    let caps = if let Some(fps) = params.framerate {
-        gstreamer::Caps::builder("video/x-raw")
-            .field("width", params.width)
-            .field("height", params.height)
-            .field("framerate", gstreamer::Fraction::new(fps, 1))
-            .build()
-    } else {
-        gstreamer::Caps::builder("video/x-raw")
-            .field("width", params.width)
-            .field("height", params.height)
-            .build()
-    };
+    // Build caps - only resolution, NOT framerate
+    // Framerate limiting is done via videorate max-rate (can only drop, not duplicate)
+    let caps = gstreamer::Caps::builder("video/x-raw")
+        .field("width", params.width)
+        .field("height", params.height)
+        .build();
 
     let capsfilter = gstreamer::ElementFactory::make("capsfilter")
         .name("caps")
         .property("caps", &caps)
         .build()?;
+
+    // Apply framerate limit via videorate if set
+    if let Some(fps) = params.framerate {
+        rate.set_property("max-rate", fps);
+    }
 
     let encoder = gstreamer::ElementFactory::make("x264enc")
         .name("encoder")
@@ -631,6 +634,7 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
         params: StreamParams::default(),
         source_framerate: None,
         restart_requested: false,
+        pipeline_started_at: None,
     }));
 
     // Initialize adaptive bitrate controller if enabled
@@ -693,6 +697,14 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
             Ok(fps) => {
                 println!("Detected source framerate: {} fps", fps);
                 state.source_framerate = Some(fps);
+
+                // Cap target framerate to source (can't request more than source provides)
+                if let Some(target_fps) = state.params.framerate {
+                    if target_fps > fps {
+                        println!("Capping target framerate from {} to {} fps (source limit)", target_fps, fps);
+                        state.params.framerate = Some(fps);
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("Warning: Could not detect source framerate: {}", e);
@@ -716,6 +728,7 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
         state.capsfilter = Some(video_pipeline.capsfilter.clone());
         state.encoder = Some(video_pipeline.encoder.clone());
         state.videorate = Some(video_pipeline.videorate.clone());
+        state.pipeline_started_at = Some(Instant::now());
     }
 
     // Start the pipeline
@@ -862,6 +875,23 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                                 continue 'reconnect;
                             }
                             println!("Encryption key received and stored");
+
+                            // Create or update segment encryptor with the new key
+                            if segment_encryptor.is_none() {
+                                if let Some(ref rec) = recorder {
+                                    let rec_config = rec.config();
+                                    let mut enc = SegmentEncryptor::new(
+                                        rec_config.output_dir.clone(),
+                                        rec_config.file_format.clone(),
+                                        pubkey_hex.to_string(),
+                                    );
+                                    if let Err(e) = enc.scan_existing() {
+                                        eprintln!("Warning: Could not scan existing recordings: {}", e);
+                                    }
+                                    segment_encryptor = Some(enc);
+                                    println!("Recording encryption enabled with new key");
+                                }
+                            }
                         }
                         Err(e) => {
                             eprintln!("Error: Invalid encryption key from central: {}", e);
@@ -1041,16 +1071,28 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                                 state.restart_requested = false;
                             }
 
-                            // Check for pipeline errors
-                            let error_restart = state.pipeline.as_ref()
-                                .map(|p| check_pipeline_bus(p).is_some())
+                            // Check if we're within the grace period after pipeline start
+                            let within_grace_period = state.pipeline_started_at
+                                .map(|t| t.elapsed() < Duration::from_secs(PIPELINE_GRACE_PERIOD_SECS))
                                 .unwrap_or(false);
 
-                            if manual_restart || error_restart {
+                            // Only check for pipeline errors if outside grace period
+                            // (RTSP sources emit transient errors during negotiation)
+                            let pipeline_error = if within_grace_period {
+                                // Drain bus messages but don't act on them during grace period
+                                if let Some(ref pipeline) = state.pipeline {
+                                    let _ = check_pipeline_bus(pipeline);
+                                }
+                                None
+                            } else {
+                                state.pipeline.as_ref().and_then(|p| check_pipeline_bus(p))
+                            };
+
+                            if manual_restart || pipeline_error.is_some() {
                                 if manual_restart {
                                     println!("[Pipeline] Manual restart requested");
-                                } else {
-                                    eprintln!("[Pipeline] Error detected, rebuilding...");
+                                } else if let Some(ref err) = pipeline_error {
+                                    eprintln!("[Pipeline] Error detected: {}", err);
                                 }
 
                                 // Teardown: set to NULL and drop references
@@ -1061,6 +1103,7 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                                 state.capsfilter = None;
                                 state.encoder = None;
                                 state.videorate = None;
+                                state.pipeline_started_at = None;
 
                                 // Rebuild pipeline
                                 match build_video_pipeline(
@@ -1079,6 +1122,7 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                                             state.capsfilter = Some(new_pipeline.capsfilter);
                                             state.encoder = Some(new_pipeline.encoder);
                                             state.videorate = Some(new_pipeline.videorate);
+                                            state.pipeline_started_at = Some(Instant::now());
                                             println!("[Pipeline] Successfully rebuilt and restarted");
                                         }
                                     }
@@ -1141,24 +1185,30 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                                     || step.height != state.params.height;
                                 let fps_changed = Some(step.framerate) != state.params.framerate;
 
-                                if res_changed || fps_changed {
+                                // Apply resolution change via capsfilter (no framerate - use videorate)
+                                if res_changed {
                                     state.params.width = step.width;
                                     state.params.height = step.height;
-                                    state.params.framerate = Some(step.framerate);
 
-                                    // Build caps with resolution and framerate
                                     if let Some(ref caps) = state.capsfilter {
                                         let new_caps = gstreamer::Caps::builder("video/x-raw")
                                             .field("width", step.width)
                                             .field("height", step.height)
-                                            .field("framerate", gstreamer::Fraction::new(step.framerate, 1))
                                             .build();
                                         caps.set_property("caps", &new_caps);
                                     }
+                                }
 
-                                    // Also set videorate max-rate for consistency
+                                // Apply framerate change via videorate max-rate
+                                // Cap to source framerate (can't request more than source provides)
+                                if fps_changed {
+                                    let effective_fps = match state.source_framerate {
+                                        Some(source_fps) => step.framerate.min(source_fps),
+                                        None => step.framerate,
+                                    };
+                                    state.params.framerate = Some(effective_fps);
                                     if let Some(ref rate) = state.videorate {
-                                        rate.set_property("max-rate", step.framerate);
+                                        rate.set_property("max-rate", effective_fps);
                                     }
                                 }
 
@@ -1321,14 +1371,12 @@ fn handle_command(
             state.params.height = height;
 
             if let Some(ref caps) = state.capsfilter {
-                // Build caps with optional framerate (only if user has set one)
-                let mut builder = gstreamer::Caps::builder("video/x-raw")
+                // Build caps with resolution only (framerate via videorate max-rate)
+                let new_caps = gstreamer::Caps::builder("video/x-raw")
                     .field("width", width)
-                    .field("height", height);
-                if let Some(fps) = state.params.framerate {
-                    builder = builder.field("framerate", gstreamer::Fraction::new(fps, 1));
-                }
-                caps.set_property("caps", &builder.build());
+                    .field("height", height)
+                    .build();
+                caps.set_property("caps", &new_caps);
                 Ok(format!("Resolution changed to {}x{}", width, height))
             } else {
                 Err("Pipeline not ready (no clients connected?)".to_string())
