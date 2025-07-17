@@ -876,18 +876,18 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                             }
                             println!("Encryption key received and stored");
 
-                            // Create or update segment encryptor with the new key
+                            // Create segment encryptor with the new key
+                            // Note: We intentionally DON'T call scan_existing() here so that
+                            // any plaintext recordings made before receiving the key will be
+                            // encrypted by process_completed() as new recordings come in.
                             if segment_encryptor.is_none() {
                                 if let Some(ref rec) = recorder {
                                     let rec_config = rec.config();
-                                    let mut enc = SegmentEncryptor::new(
+                                    let enc = SegmentEncryptor::new(
                                         rec_config.output_dir.clone(),
                                         rec_config.file_format.clone(),
                                         pubkey_hex.to_string(),
                                     );
-                                    if let Err(e) = enc.scan_existing() {
-                                        eprintln!("Warning: Could not scan existing recordings: {}", e);
-                                    }
                                     segment_encryptor = Some(enc);
                                     println!("Recording encryption enabled with new key");
                                 }
