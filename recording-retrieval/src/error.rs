@@ -56,6 +56,9 @@ pub enum RetrievalError {
 
     #[error("Encrypted file received but no decryption key available")]
     NoDecryptionKey,
+
+    #[error("Invalid filename: {0}")]
+    InvalidFilename(String),
 }
 
 impl From<std::io::Error> for RetrievalError {

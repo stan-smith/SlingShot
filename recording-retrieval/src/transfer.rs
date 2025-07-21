@@ -11,6 +11,58 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::protocol::{FileChunk, FileComplete, FileHeader, TransferComplete, TransferError};
 use crate::{RecordingFile, RetrievalError};
 
+/// Sanitize and validate a filename received from remote.
+/// Prevents path traversal attacks by rejecting dangerous patterns.
+fn sanitize_filename(filename: &str) -> Result<String, RetrievalError> {
+    // Reject path traversal attempts
+    if filename.contains("..") {
+        return Err(RetrievalError::InvalidFilename(
+            "path traversal attempt detected (contains '..')".into(),
+        ));
+    }
+
+    let path = Path::new(filename);
+
+    // Reject absolute paths
+    if path.is_absolute() {
+        return Err(RetrievalError::InvalidFilename(
+            "absolute paths not allowed".into(),
+        ));
+    }
+
+    // Extract just the filename component (rejects paths with directories)
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| RetrievalError::InvalidFilename("invalid filename".into()))?;
+
+    // If filename contained path separators, the extracted name will differ
+    if name != filename {
+        return Err(RetrievalError::InvalidFilename(
+            "filename contains path separators".into(),
+        ));
+    }
+
+    // Validate expected recording file extensions
+    if !name.ends_with(".mp4") && !name.ends_with(".mp4.enc") {
+        return Err(RetrievalError::InvalidFilename(
+            "unexpected file extension (expected .mp4 or .mp4.enc)".into(),
+        ));
+    }
+
+    // Validate characters: only alphanumeric, dash, underscore, dot allowed
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err(RetrievalError::InvalidFilename(
+            "filename contains invalid characters".into(),
+        ));
+    }
+
+    Ok(name.to_string())
+}
+
 /// File transfer sender (runs on remote)
 pub struct FileTransferSender {
     request_counter: AtomicU32,
@@ -270,10 +322,13 @@ impl FileTransferReceiver {
 
     /// Start receiving a new file
     pub async fn start_file(&mut self, header: FileHeader) -> Result<PathBuf, RetrievalError> {
+        // Validate and sanitize filename to prevent path traversal
+        let safe_filename = sanitize_filename(&header.filename)?;
+
         // Ensure output directory exists
         tokio::fs::create_dir_all(&self.output_dir).await?;
 
-        let output_path = self.output_dir.join(&header.filename);
+        let output_path = self.output_dir.join(&safe_filename);
         let file = File::create(&output_path).await?;
 
         let key = (header.request_id, header.file_index);
@@ -433,5 +488,59 @@ impl FileTransferReceiver {
     /// Get output directory
     pub fn output_dir(&self) -> &Path {
         &self.output_dir
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_valid_filename() {
+        assert_eq!(
+            sanitize_filename("2024-12-01_15-30-00.mp4").unwrap(),
+            "2024-12-01_15-30-00.mp4"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_valid_encrypted_filename() {
+        assert_eq!(
+            sanitize_filename("2024-12-01_15-30-00.mp4.enc").unwrap(),
+            "2024-12-01_15-30-00.mp4.enc"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_rejects_path_traversal() {
+        assert!(sanitize_filename("../../../etc/passwd").is_err());
+        assert!(sanitize_filename("..\\..\\windows\\system32").is_err());
+        assert!(sanitize_filename("foo/../bar.mp4").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_rejects_absolute_paths() {
+        assert!(sanitize_filename("/etc/passwd").is_err());
+        assert!(sanitize_filename("/tmp/evil.mp4").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_rejects_directory_paths() {
+        assert!(sanitize_filename("subdir/file.mp4").is_err());
+        assert!(sanitize_filename("a/b/c.mp4").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_rejects_wrong_extension() {
+        assert!(sanitize_filename("file.txt").is_err());
+        assert!(sanitize_filename("file.sh").is_err());
+        assert!(sanitize_filename("authorized_keys").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_rejects_special_characters() {
+        assert!(sanitize_filename("file;rm -rf.mp4").is_err());
+        assert!(sanitize_filename("file$(cmd).mp4").is_err());
+        assert!(sanitize_filename("file`id`.mp4").is_err());
     }
 }

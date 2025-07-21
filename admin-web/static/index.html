@@ -589,7 +589,15 @@ function updateNodeList() {
   connectedNodes.forEach((info, name) => {
     const card = document.createElement('div');
     card.className = 'node-card' + (selectedNode === name ? ' selected' : '');
-    card.innerHTML = `<div class="node-dot"></div><span>${name}</span>`;
+
+    const dot = document.createElement('div');
+    dot.className = 'node-dot';
+
+    const span = document.createElement('span');
+    span.textContent = name;  // Safe: textContent escapes HTML
+
+    card.appendChild(dot);
+    card.appendChild(span);
     card.onclick = () => selectNode(name);
     container.appendChild(card);
   });
@@ -605,13 +613,32 @@ function updatePendingList() {
   pendingNodes.forEach((info, name) => {
     const card = document.createElement('div');
     card.className = 'node-card pending';
-    card.innerHTML = `
-      <div class="node-dot"></div>
-      <span>${name}</span>
-      <div class="node-actions">
-        <button class="approve" onclick="event.stopPropagation();approveNode('${name}')">Approve</button>
-        <button class="reject" onclick="event.stopPropagation();rejectNode('${name}')">Reject</button>
-      </div>`;
+
+    const dot = document.createElement('div');
+    dot.className = 'node-dot';
+
+    const span = document.createElement('span');
+    span.textContent = name;  // Safe: textContent escapes HTML
+
+    const actions = document.createElement('div');
+    actions.className = 'node-actions';
+
+    const approveBtn = document.createElement('button');
+    approveBtn.className = 'approve';
+    approveBtn.textContent = 'Approve';
+    approveBtn.onclick = (e) => { e.stopPropagation(); approveNode(name); };
+
+    const rejectBtn = document.createElement('button');
+    rejectBtn.className = 'reject';
+    rejectBtn.textContent = 'Reject';
+    rejectBtn.onclick = (e) => { e.stopPropagation(); rejectNode(name); };
+
+    actions.appendChild(approveBtn);
+    actions.appendChild(rejectBtn);
+
+    card.appendChild(dot);
+    card.appendChild(span);
+    card.appendChild(actions);
     container.appendChild(card);
   });
 }
