@@ -351,7 +351,7 @@ async fn async_main(
 
     println!("Fingerprint: {}", &fingerprint[..32]);
 
-    let client_config = quic_common::create_client_config()?;
+    let (client_config, _verifier) = quic_common::create_pinning_client_config(None)?;
 
     let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
     let endpoint = Endpoint::client(bind_addr)?;

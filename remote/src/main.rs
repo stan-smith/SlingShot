@@ -4,8 +4,8 @@ use adaptive_bitrate::{AdaptiveController, QualityChange};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use config_manager::{
-    EncryptionConfig, IdentityConfig, OnvifConfig, RemoteConfig, RtspConfig, SourceConfig,
-    StorageConfig as CfgStorageConfig,
+    EncryptionConfig, IdentityConfig, OnvifConfig, PinnedCertConfig, RemoteConfig, RtspConfig,
+    SourceConfig, StorageConfig as CfgStorageConfig,
 };
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use ffmpeg_recorder::{ensure_disk_space, Recorder, RecorderConfig, SegmentEncryptor};
@@ -769,7 +769,25 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
 
         println!("Connecting to central node at {}...", config.central_address);
 
-        let client_config = match quic_common::create_client_config() {
+        // Check for pinned certificate (TOFU)
+        let expected_fingerprint = if PinnedCertConfig::exists() {
+            match PinnedCertConfig::load() {
+                Ok(pinned) => {
+                    println!("Using pinned certificate: {}", pinned.fingerprint());
+                    Some(pinned.fingerprint().to_string())
+                }
+                Err(e) => {
+                    eprintln!("Failed to load pinned cert: {}. Using TOFU mode.", e);
+                    None
+                }
+            }
+        } else {
+            println!("First connection - using Trust on First Use (TOFU)");
+            None
+        };
+        let is_tofu = expected_fingerprint.is_none();
+
+        let (client_config, verifier) = match quic_common::create_pinning_client_config(expected_fingerprint) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Failed to create QUIC config: {}. Retrying in {}s...", e, RECONNECT_INTERVAL_SECS);
@@ -792,6 +810,15 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
             Ok(connecting) => match connecting.await {
                 Ok(conn) => conn,
                 Err(e) => {
+                    let err_str = e.to_string();
+                    if err_str.contains("certificate") || err_str.contains("BadEncoding") {
+                        eprintln!("CERTIFICATE MISMATCH - possible MITM attack!");
+                        eprintln!("The server's certificate does not match the pinned certificate.");
+                        eprintln!("If the server certificate was legitimately changed:");
+                        eprintln!("  Delete ~/.config/kaiju/pinned-cert.toml to re-establish trust");
+                        // Don't retry automatically for security - exit
+                        std::process::exit(1);
+                    }
                     eprintln!("Connection failed: {}. Retrying in {}s...", e, RECONNECT_INTERVAL_SECS);
                     tokio::time::sleep(Duration::from_secs(RECONNECT_INTERVAL_SECS)).await;
                     continue 'reconnect;
@@ -805,6 +832,18 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
         };
 
         println!("Connected to central node");
+
+        // Pin the certificate if this was a TOFU connection
+        if is_tofu {
+            if let Some(fp) = verifier.observed_fingerprint() {
+                let pinned = PinnedCertConfig::new(fp.clone());
+                if let Err(e) = pinned.save() {
+                    eprintln!("Warning: Failed to save pinned certificate: {}", e);
+                } else {
+                    println!("Certificate pinned: {}", fp);
+                }
+            }
+        }
 
         // Send authentication request: AUTH|name|fingerprint|VIDEO|ENCRYPT or NOENC
         // The "VIDEO" marker indicates this node will stream video over QUIC (not RTSP)

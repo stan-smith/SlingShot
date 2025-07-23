@@ -1,6 +1,6 @@
 use admin_web::{broadcast, request_approval, run_admin_server, AdminCommand, AdminState};
 use anyhow::Result;
-use config_manager::CentralConfig;
+use config_manager::{CentralConfig, TlsCertConfig};
 use fingerprint_store::FingerprintStore;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSrc;
@@ -105,22 +105,34 @@ async fn async_main() -> Result<()> {
 
     println!("RTSP relay server listening on port {}", config.rtsp_port);
 
-    // Generate self-signed Ed25519 certificate for QUIC
-    let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
-    let cert_params = rcgen::CertificateParams::new(vec![
-        "localhost".to_string(),
-        "0.0.0.0".to_string(),
-    ])?;
-    let cert = cert_params.self_signed(&key_pair)?;
+    // Load or generate persistent TLS certificate
+    let tls_cert = if TlsCertConfig::exists() {
+        println!("Loading existing TLS certificate...");
+        TlsCertConfig::load()?
+    } else {
+        println!("Generating new TLS certificate...");
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
+        let cert_params = rcgen::CertificateParams::new(vec![
+            "localhost".to_string(),
+            "0.0.0.0".to_string(),
+        ])?;
+        let cert = cert_params.self_signed(&key_pair)?;
+        let new_cert = TlsCertConfig::new(cert.pem(), key_pair.serialize_pem());
+        new_cert.save()?;
+        new_cert
+    };
 
-    let cert_pem = cert.pem();
-    let key_pem = key_pair.serialize_pem();
-
-    let cert_chain = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+    let cert_chain = rustls_pemfile::certs(&mut tls_cert.cert_pem().as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| anyhow::anyhow!("Failed to parse certificate: {}", e))?;
 
-    let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
+    // Compute and display fingerprint for TOFU verification
+    if let Some(cert_der) = cert_chain.first() {
+        let fingerprint = quic_common::compute_cert_fingerprint(cert_der);
+        println!("TLS Certificate fingerprint: {}", fingerprint);
+    }
+
+    let key = rustls_pemfile::private_key(&mut tls_cert.key_pem().as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to parse key: {}", e))?
         .ok_or_else(|| anyhow::anyhow!("No private key found"))?;
 
