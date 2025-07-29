@@ -313,15 +313,91 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
 .rejected { color: var(--accent-red); }
 .response { color: var(--accent-cyan); }
 .command { color: var(--text-muted); }
+/* Login overlay */
+.login-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.95);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.login-box {
+  background: var(--bg-secondary);
+  padding: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--text-primary);
+  text-align: center;
+  min-width: 300px;
+}
+.login-box h2 {
+  font-size: 18px;
+  font-weight: normal;
+  margin-bottom: 24px;
+  color: var(--text-primary);
+}
+.login-box input {
+  display: block;
+  width: 100%;
+  margin: 12px 0;
+  padding: 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 14px;
+  border-radius: 4px;
+}
+.login-box input:focus {
+  outline: none;
+  border-color: var(--text-primary);
+}
+.login-box button {
+  width: 100%;
+  margin-top: 16px;
+  padding: 10px;
+  font-size: 14px;
+}
+.login-error {
+  color: var(--accent-red);
+  font-size: 12px;
+  margin-top: 12px;
+  min-height: 16px;
+}
+.logout-btn {
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  padding: 4px 12px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.logout-btn:hover {
+  border-color: var(--accent-red);
+  color: var(--accent-red);
+}
 </style>
 </head>
 <body>
+<!-- Login Overlay -->
+<div id="login-overlay" class="login-overlay">
+  <div class="login-box">
+    <h2>SlingShot Admin</h2>
+    <input type="text" id="login-username" placeholder="Username" value="admin">
+    <input type="password" id="login-password" placeholder="Password" onkeydown="if(event.key==='Enter')login()">
+    <button onclick="login()">Login</button>
+    <div id="login-error" class="login-error"></div>
+  </div>
+</div>
+
 <div class="app">
   <header class="header">
     <h1>SlingShot Admin</h1>
     <div class="status">
       <div class="status-dot" id="status-dot"></div>
       <span id="status-text">Disconnected</span>
+      <button id="logout-btn" class="logout-btn" onclick="logout()" style="display:none">Logout</button>
     </div>
   </header>
 
@@ -483,29 +559,64 @@ let commandHistory = [];
 let historyIndex = -1;
 let ptzContinuous = false;
 
+// Authentication state
+let sessionToken = localStorage.getItem('admin_session');
+let pendingCredentials = null;
+
 // DOM elements
 const log = document.getElementById('log');
 const cmd = document.getElementById('cmd');
 const statusDot = document.getElementById('status-dot');
 const statusText = document.getElementById('status-text');
+const loginOverlay = document.getElementById('login-overlay');
+const loginError = document.getElementById('login-error');
+const logoutBtn = document.getElementById('logout-btn');
 
 // Initialize
-connectWebSocket();
 setupTabs();
+if (sessionToken) {
+  // Try to reconnect with saved session
+  connectWebSocket();
+}
+
+function login() {
+  const username = document.getElementById('login-username').value;
+  const password = document.getElementById('login-password').value;
+  if (!username || !password) {
+    loginError.textContent = 'Please enter username and password';
+    return;
+  }
+  loginError.textContent = '';
+  pendingCredentials = { username, password };
+  connectWebSocket();
+}
+
+function logout() {
+  localStorage.removeItem('admin_session');
+  sessionToken = null;
+  if (ws) ws.close();
+  location.reload();
+}
 
 function connectWebSocket() {
   ws = new WebSocket(`ws://${location.host}/ws`);
   ws.onopen = () => {
-    statusDot.classList.add('connected');
-    statusText.textContent = 'Connected';
-    append('--- Connected ---', 'system');
-    ws.send('nodes');
+    // Send authentication
+    if (sessionToken) {
+      ws.send(`TOKEN|${sessionToken}`);
+    } else if (pendingCredentials) {
+      ws.send(`AUTH|${pendingCredentials.username}|${pendingCredentials.password}`);
+      pendingCredentials = null;
+    }
   };
   ws.onclose = () => {
     statusDot.classList.remove('connected');
     statusText.textContent = 'Disconnected';
-    append('--- Disconnected ---', 'system');
-    setTimeout(connectWebSocket, 3000);
+    // Only auto-reconnect if we have a session token
+    if (sessionToken) {
+      append('--- Disconnected, reconnecting... ---', 'system');
+      setTimeout(connectWebSocket, 3000);
+    }
   };
   ws.onerror = () => append('--- Error ---', 'error');
   ws.onmessage = handleMessage;
@@ -513,6 +624,33 @@ function connectWebSocket() {
 
 function handleMessage(e) {
   const msg = e.data;
+  // Handle authentication responses first
+  if (msg.startsWith('AUTH_OK|')) {
+    const token = msg.split('|')[1];
+    if (token) {
+      sessionToken = token;
+      localStorage.setItem('admin_session', token);
+    }
+    // Hide login overlay, show logout button
+    loginOverlay.style.display = 'none';
+    logoutBtn.style.display = 'block';
+    statusDot.classList.add('connected');
+    statusText.textContent = 'Connected';
+    append('--- Authenticated ---', 'system');
+    ws.send('nodes');
+    return;
+  } else if (msg === 'AUTH_FAILED') {
+    // Clear invalid session
+    localStorage.removeItem('admin_session');
+    sessionToken = null;
+    // Show login overlay with error
+    loginOverlay.style.display = 'flex';
+    logoutBtn.style.display = 'none';
+    loginError.textContent = 'Invalid credentials';
+    if (ws) ws.close();
+    return;
+  }
+
   if (msg.startsWith('PENDING|')) {
     const [_, name, fp, addr] = msg.split('|');
     pendingNodes.set(name, { fingerprint: fp, address: addr });

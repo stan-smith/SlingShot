@@ -8,9 +8,11 @@ use axum::{
     routing::get,
     Router,
 };
+use fingerprint_store::FingerprintStore;
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// Pending node awaiting admin approval
@@ -32,6 +34,8 @@ pub struct AdminState {
     next_session_id: Mutex<u64>,
     /// Channel to send commands to central daemon
     pub command_tx: mpsc::Sender<AdminCommand>,
+    /// Fingerprint store for authentication
+    pub store: Arc<Mutex<FingerprintStore>>,
 }
 
 /// Command from admin to daemon
@@ -40,12 +44,13 @@ pub struct AdminCommand {
 }
 
 impl AdminState {
-    pub fn new(command_tx: mpsc::Sender<AdminCommand>) -> Self {
+    pub fn new(command_tx: mpsc::Sender<AdminCommand>, store: Arc<Mutex<FingerprintStore>>) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
             pending_nodes: Mutex::new(Vec::new()),
             next_session_id: Mutex::new(1),
             command_tx,
+            store,
         }
     }
 
@@ -128,8 +133,56 @@ async fn ws_handler(
 
 async fn handle_socket(socket: WebSocket, state: Arc<AdminState>) {
     let (mut ws_tx, mut ws_rx) = socket.split();
-    let (tx, mut rx) = mpsc::channel::<String>(100);
 
+    // ========== Authentication Phase ==========
+    // Wait for AUTH or TOKEN message (timeout 30s)
+    let auth_result = tokio::time::timeout(Duration::from_secs(30), ws_rx.next()).await;
+
+    let (authenticated, session_token) = match auth_result {
+        Ok(Some(Ok(Message::Text(msg)))) => {
+            let store = state.store.lock().await;
+            if msg.starts_with("AUTH|") {
+                // Password auth: AUTH|username|password
+                let parts: Vec<&str> = msg.split('|').collect();
+                if parts.len() == 3 {
+                    if store.verify_admin(parts[1], parts[2]).unwrap_or(false) {
+                        // Create session token
+                        let token = store.create_session(parts[1]).ok();
+                        (true, token)
+                    } else {
+                        (false, None)
+                    }
+                } else {
+                    (false, None)
+                }
+            } else if msg.starts_with("TOKEN|") {
+                // Token auth: TOKEN|session_token
+                let token = msg.strip_prefix("TOKEN|").unwrap_or("");
+                if store.verify_session(token).unwrap_or(None).is_some() {
+                    (true, Some(token.to_string()))
+                } else {
+                    (false, None)
+                }
+            } else {
+                (false, None)
+            }
+        }
+        _ => (false, None),
+    };
+
+    if !authenticated {
+        // Rate limit: 1 second delay on failed auth to prevent brute force
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let _ = ws_tx.send(Message::Text("AUTH_FAILED".into())).await;
+        return;
+    }
+
+    // Send auth success with token
+    let token_msg = format!("AUTH_OK|{}", session_token.unwrap_or_default());
+    let _ = ws_tx.send(Message::Text(token_msg.into())).await;
+
+    // ========== Authenticated Session ==========
+    let (tx, mut rx) = mpsc::channel::<String>(100);
     let session_id = state.next_id().await;
 
     // Register session
@@ -137,9 +190,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<AdminState>) {
         let mut sessions = state.sessions.lock().await;
         sessions.insert(session_id, tx);
     }
-
-    // Send welcome
-    let _ = ws_tx.send(Message::Text("Connected to central admin".into())).await;
 
     // Send current pending nodes
     {

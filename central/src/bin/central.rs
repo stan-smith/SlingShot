@@ -193,7 +193,7 @@ async fn async_main() -> Result<()> {
 
     // Create admin state and channel
     let (admin_cmd_tx, mut admin_cmd_rx) = mpsc::channel::<AdminCommand>(100);
-    let admin_state = Arc::new(AdminState::new(admin_cmd_tx));
+    let admin_state = Arc::new(AdminState::new(admin_cmd_tx, Arc::clone(&fingerprint_store)));
 
     // Start admin web server
     let admin_addr = config.admin_addrs().into_iter().next()

@@ -1,6 +1,8 @@
 use anyhow::Result;
 use config_manager::CentralConfig;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
+use fingerprint_store::FingerprintStore;
+use rand::Rng;
 
 /// Network interface info for display
 struct InterfaceInfo {
@@ -146,11 +148,51 @@ fn finish_wizard(existing: Option<CentralConfig>, bind_interface: String) -> Res
         let path = CentralConfig::default_path()?;
         println!();
         println!("Configuration saved to {}", path.display());
+
+        // Setup admin user if not exists
+        setup_admin_user()?;
+
         println!();
         println!("Restart the central node for changes to take effect.");
     } else {
         println!("Configuration not saved.");
     }
+
+    Ok(())
+}
+
+/// Generate a random alphanumeric password
+fn generate_alphanumeric_password(len: usize) -> String {
+    const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut rng = rand::thread_rng();
+    (0..len)
+        .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
+        .collect()
+}
+
+/// Setup admin user if not already exists
+fn setup_admin_user() -> Result<()> {
+    let store = FingerprintStore::open()?;
+
+    if store.admin_exists()? {
+        println!();
+        println!("Admin user already exists.");
+        return Ok(());
+    }
+
+    println!();
+    println!("=== Admin User Setup ===");
+    println!();
+
+    let password = generate_alphanumeric_password(20);
+    store.create_admin_user("admin", &password)?;
+
+    println!("Admin user created!");
+    println!();
+    println!("  Username: admin");
+    println!("  Password: {}", password);
+    println!();
+    println!("  *** SAVE THIS PASSWORD - it will not be shown again! ***");
 
     Ok(())
 }

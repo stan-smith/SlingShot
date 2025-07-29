@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use kaiju_encryption::X25519KeyPair;
+use rand::Rng;
 use rusqlite::{params, Connection};
+use sha2::{Digest, Sha256};
 
 use crate::error::StoreError;
 
@@ -111,6 +113,27 @@ impl FingerprintStore {
         // Index for quick node_name lookup
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_node_name ON approved_nodes(node_name)",
+            [],
+        )?;
+
+        // Admin users table
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS admin_users (
+                username TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        // Admin sessions table
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS admin_sessions (
+                token TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (username) REFERENCES admin_users(username)
+            )",
             [],
         )?;
 
@@ -335,6 +358,95 @@ impl FingerprintStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    // ========== Admin User Management ==========
+
+    /// Hash a password using SHA-256
+    fn hash_password(password: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(password.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
+    /// Generate a random session token (64 hex chars = 32 bytes)
+    fn generate_session_token() -> String {
+        let mut rng = rand::thread_rng();
+        let bytes: [u8; 32] = rng.gen();
+        hex::encode(bytes)
+    }
+
+    /// Check if any admin user exists
+    pub fn admin_exists(&self) -> Result<bool, StoreError> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM admin_users", [], |row| row.get(0))?;
+        Ok(count > 0)
+    }
+
+    /// Create an admin user with the given username and password
+    pub fn create_admin_user(&self, username: &str, password: &str) -> Result<(), StoreError> {
+        let password_hash = Self::hash_password(password);
+        let now = Utc::now().to_rfc3339();
+
+        self.conn.execute(
+            "INSERT INTO admin_users (username, password_hash, created_at) VALUES (?1, ?2, ?3)",
+            params![username, password_hash, now],
+        )?;
+
+        Ok(())
+    }
+
+    /// Verify admin credentials
+    pub fn verify_admin(&self, username: &str, password: &str) -> Result<bool, StoreError> {
+        let password_hash = Self::hash_password(password);
+
+        let result: Result<String, _> = self.conn.query_row(
+            "SELECT password_hash FROM admin_users WHERE username = ?",
+            [username],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(stored_hash) => Ok(stored_hash == password_hash),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Create a new session for a user, returns the session token
+    pub fn create_session(&self, username: &str) -> Result<String, StoreError> {
+        let token = Self::generate_session_token();
+        let now = Utc::now().to_rfc3339();
+
+        self.conn.execute(
+            "INSERT INTO admin_sessions (token, username, created_at) VALUES (?1, ?2, ?3)",
+            params![token, username, now],
+        )?;
+
+        Ok(token)
+    }
+
+    /// Verify a session token, returns the username if valid
+    pub fn verify_session(&self, token: &str) -> Result<Option<String>, StoreError> {
+        let result: Result<String, _> = self.conn.query_row(
+            "SELECT username FROM admin_sessions WHERE token = ?",
+            [token],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(username) => Ok(Some(username)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Delete a session (logout)
+    pub fn delete_session(&self, token: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM admin_sessions WHERE token = ?", [token])?;
+        Ok(())
     }
 }
 

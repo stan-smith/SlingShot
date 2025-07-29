@@ -12,6 +12,9 @@ path = "src/main.rs"
 # Configuration management
 config-manager = { path = "../config-manager" }
 
+# Fingerprint/user storage
+fingerprint-store = { path = "../fingerprint-store" }
+
 # CLI parsing
 clap = { version = "4", features = ["derive"] }
 
@@ -23,3 +26,6 @@ anyhow = "1"
 
 # Network interface enumeration
 if-addrs = "0.13"
+
+# Password generation
+rand = "0.8"
