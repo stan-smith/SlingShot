@@ -23,4 +23,13 @@ pub enum StoreError {
 
     #[error("Invalid fingerprint: {0}")]
     InvalidFingerprint(String),
+
+    #[error("TOTP error: {0}")]
+    TotpError(String),
+
+    #[error("Invalid role: {0} (must be 'admin' or 'user')")]
+    InvalidRole(String),
+
+    #[error("Cannot remove or demote the last admin user")]
+    LastAdmin,
 }

@@ -5,5 +5,5 @@
 mod db;
 mod error;
 
-pub use db::{ApprovedNode, FingerprintStore};
+pub use db::{ApprovedNode, FingerprintStore, UserInfo};
 pub use error::StoreError;

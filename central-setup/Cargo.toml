@@ -27,5 +27,5 @@ anyhow = "1"
 # Network interface enumeration
 if-addrs = "0.13"
 
-# Password generation
-rand = "0.8"
+# QR code display in terminal
+qrcode = "0.14"

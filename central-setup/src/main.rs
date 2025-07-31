@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::Parser;
 use config_manager::CentralConfig;
 use dialoguer::{theme::ColorfulTheme, Select};
+use fingerprint_store::FingerprintStore;
 
 #[derive(Parser)]
 #[command(name = "kaiju-central-setup")]
@@ -41,11 +42,14 @@ fn run_menu() -> Result<()> {
 
     loop {
         let has_config = CentralConfig::exists();
+        let has_admin = FingerprintStore::open()
+            .map(|s| s.any_users_exist().unwrap_or(false))
+            .unwrap_or(false);
 
         // Show current state
         if has_config {
             println!(
-                "Config: found at {}",
+                "Config: {}",
                 CentralConfig::default_path()
                     .unwrap_or_default()
                     .display()
@@ -53,38 +57,81 @@ fn run_menu() -> Result<()> {
         } else {
             println!("Config: not configured (will use defaults)");
         }
+
+        if has_admin {
+            println!("Admin:  configured");
+        } else {
+            println!("Admin:  not configured");
+        }
         println!();
 
-        let options = vec![
-            "Configure network bindings",
-            "Show current configuration",
-            "Exit",
-        ];
+        // Different menu based on whether initial setup is needed
+        if !has_config || !has_admin {
+            // Initial setup needed
+            let options = vec![
+                "Run initial setup (network + admin account)",
+                "Show current configuration",
+                "Exit",
+            ];
 
-        let selection = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt("Select an option")
-            .items(&options)
-            .default(0)
-            .interact()?;
+            let selection = Select::with_theme(&ColorfulTheme::default())
+                .with_prompt("Select an option")
+                .items(&options)
+                .default(0)
+                .interact()?;
 
-        println!();
+            println!();
 
-        match selection {
-            0 => {
-                if let Err(e) = wizard::run_wizard() {
-                    eprintln!("Configuration failed: {}", e);
+            match selection {
+                0 => {
+                    if let Err(e) = wizard::run_wizard() {
+                        eprintln!("Configuration failed: {}", e);
+                    }
                 }
-            }
-            1 => {
-                if let Err(e) = show_status() {
-                    eprintln!("Error: {}", e);
+                1 => {
+                    if let Err(e) = show_status() {
+                        eprintln!("Error: {}", e);
+                    }
                 }
+                2 => {
+                    println!("Goodbye!");
+                    break;
+                }
+                _ => unreachable!(),
             }
-            2 => {
-                println!("Goodbye!");
-                break;
+        } else {
+            // Already configured - show reconfigure options
+            let options = vec![
+                "Reconfigure network bindings",
+                "Show current configuration",
+                "Exit",
+            ];
+
+            let selection = Select::with_theme(&ColorfulTheme::default())
+                .with_prompt("Select an option")
+                .items(&options)
+                .default(0)
+                .interact()?;
+
+            println!();
+
+            match selection {
+                0 => {
+                    if let Err(e) = wizard::run_wizard() {
+                        eprintln!("Configuration failed: {}", e);
+                    }
+                }
+                1 => {
+                    if let Err(e) = show_status() {
+                        eprintln!("Error: {}", e);
+                    }
+                }
+                2 => {
+                    println!("Goodbye!");
+                    break;
+                }
+                _ => unreachable!(),
             }
-            _ => unreachable!(),
         }
 
         println!();

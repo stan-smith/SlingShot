@@ -2,7 +2,7 @@ use anyhow::Result;
 use config_manager::CentralConfig;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use fingerprint_store::FingerprintStore;
-use rand::Rng;
+use qrcode::QrCode;
 
 /// Network interface info for display
 struct InterfaceInfo {
@@ -161,38 +161,76 @@ fn finish_wizard(existing: Option<CentralConfig>, bind_interface: String) -> Res
     Ok(())
 }
 
-/// Generate a random alphanumeric password
-fn generate_alphanumeric_password(len: usize) -> String {
-    const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let mut rng = rand::thread_rng();
-    (0..len)
-        .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
-        .collect()
+/// Display QR code in terminal using Unicode blocks
+fn display_qr_terminal(data: &str) -> Result<()> {
+    let code = QrCode::new(data.as_bytes())?;
+    let string = code.render::<char>()
+        .quiet_zone(true)
+        .module_dimensions(2, 1)
+        .build();
+    println!("{}", string);
+    Ok(())
 }
 
-/// Setup admin user if not already exists
+/// Setup admin user with TOTP if not already exists
 fn setup_admin_user() -> Result<()> {
     let store = FingerprintStore::open()?;
 
-    if store.admin_exists()? {
+    if store.any_users_exist()? {
         println!();
         println!("Admin user already exists.");
         return Ok(());
     }
 
     println!();
-    println!("=== Admin User Setup ===");
+    println!("=== Admin User Setup (TOTP) ===");
     println!();
 
-    let password = generate_alphanumeric_password(20);
-    store.create_admin_user("admin", &password)?;
+    let username: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Admin username")
+        .default("admin".to_string())
+        .interact_text()?;
 
-    println!("Admin user created!");
+    let description: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Description (optional)")
+        .allow_empty(true)
+        .interact_text()?;
+
+    // Generate TOTP secret
+    let (totp_secret, _qr_png) = FingerprintStore::generate_totp_secret(&username)?;
+
+    // Build otpauth URL for QR code
+    let otpauth_url = format!(
+        "otpauth://totp/SlingShot:{}?secret={}&issuer=SlingShot&algorithm=SHA1&digits=6&period=30",
+        username, totp_secret
+    );
+
     println!();
-    println!("  Username: admin");
-    println!("  Password: {}", password);
+    println!("Scan this QR code with your authenticator app:");
+    println!("(Google Authenticator, Authy, 1Password, etc.)");
     println!();
-    println!("  *** SAVE THIS PASSWORD - it will not be shown again! ***");
+    display_qr_terminal(&otpauth_url)?;
+    println!();
+    println!("Or manually enter this secret: {}", totp_secret);
+    println!();
+
+    // Verify TOTP before saving
+    loop {
+        let code: String = Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Enter 6-digit code from your authenticator")
+            .interact_text()?;
+
+        // Verify code against secret directly (no database needed yet)
+        if FingerprintStore::verify_totp_code(&totp_secret, &code)? {
+            // Code valid - create the user
+            store.create_user(&username, &totp_secret, "admin", &description)?;
+            println!();
+            println!("Admin account '{}' created successfully!", username);
+            break;
+        } else {
+            println!("Invalid code. Please try again.");
+        }
+    }
 
     Ok(())
 }

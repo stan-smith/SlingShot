@@ -110,6 +110,7 @@ pub async fn request_approval(
 pub async fn run_admin_server(addr: &str, state: Arc<AdminState>) -> Result<()> {
     let app = Router::new()
         .route("/", get(index_handler))
+        .route("/admin", get(admin_page_handler))
         .route("/ws", get(ws_handler))
         .with_state(state);
 
@@ -124,6 +125,10 @@ async fn index_handler() -> impl IntoResponse {
     Html(INDEX_HTML)
 }
 
+async fn admin_page_handler() -> impl IntoResponse {
+    Html(ADMIN_HTML)
+}
+
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AdminState>>,
@@ -135,39 +140,47 @@ async fn handle_socket(socket: WebSocket, state: Arc<AdminState>) {
     let (mut ws_tx, mut ws_rx) = socket.split();
 
     // ========== Authentication Phase ==========
-    // Wait for AUTH or TOKEN message (timeout 30s)
+    // Wait for TOTP or TOKEN message (timeout 30s)
     let auth_result = tokio::time::timeout(Duration::from_secs(30), ws_rx.next()).await;
 
-    let (authenticated, session_token) = match auth_result {
+    let (authenticated, session_token, user_role) = match auth_result {
         Ok(Some(Ok(Message::Text(msg)))) => {
             let store = state.store.lock().await;
-            if msg.starts_with("AUTH|") {
-                // Password auth: AUTH|username|password
+            if msg.starts_with("TOTP|") {
+                // TOTP auth: TOTP|username|code
                 let parts: Vec<&str> = msg.split('|').collect();
                 if parts.len() == 3 {
-                    if store.verify_admin(parts[1], parts[2]).unwrap_or(false) {
+                    let username = parts[1];
+                    let code = parts[2];
+                    if store.verify_totp(username, code).unwrap_or(false) {
+                        // Get user role
+                        let role = store.get_user(username)
+                            .ok()
+                            .flatten()
+                            .map(|u| u.role)
+                            .unwrap_or_else(|| "user".to_string());
                         // Create session token
-                        let token = store.create_session(parts[1]).ok();
-                        (true, token)
+                        let token = store.create_session(username).ok();
+                        (true, token, role)
                     } else {
-                        (false, None)
+                        (false, None, String::new())
                     }
                 } else {
-                    (false, None)
+                    (false, None, String::new())
                 }
             } else if msg.starts_with("TOKEN|") {
                 // Token auth: TOKEN|session_token
                 let token = msg.strip_prefix("TOKEN|").unwrap_or("");
-                if store.verify_session(token).unwrap_or(None).is_some() {
-                    (true, Some(token.to_string()))
+                if let Some((_username, role)) = store.verify_session(token).unwrap_or(None) {
+                    (true, Some(token.to_string()), role)
                 } else {
-                    (false, None)
+                    (false, None, String::new())
                 }
             } else {
-                (false, None)
+                (false, None, String::new())
             }
         }
-        _ => (false, None),
+        _ => (false, None, String::new()),
     };
 
     if !authenticated {
@@ -177,9 +190,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AdminState>) {
         return;
     }
 
-    // Send auth success with token
-    let token_msg = format!("AUTH_OK|{}", session_token.unwrap_or_default());
+    // Send auth success with token and role
+    let token_msg = format!("AUTH_OK|{}|{}", session_token.unwrap_or_default(), user_role);
     let _ = ws_tx.send(Message::Text(token_msg.into())).await;
+
+    // Track role for permission checks
+    let is_admin = user_role == "admin";
 
     // ========== Authenticated Session ==========
     let (tx, mut rx) = mpsc::channel::<String>(100);
@@ -224,13 +240,21 @@ async fn handle_socket(socket: WebSocket, state: Arc<AdminState>) {
                 continue;
             }
 
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.is_empty() {
-                continue;
-            }
+            // Get command name (first segment before | or space)
+            let cmd_end = line.find(|c| c == '|' || c == ' ').unwrap_or(line.len());
+            let cmd = &line[..cmd_end].to_lowercase();
 
-            match parts[0].to_lowercase().as_str() {
+            // For whitespace-separated commands
+            let parts: Vec<&str> = line.split_whitespace().collect();
+
+            match cmd.as_str() {
                 "approve" if parts.len() >= 2 => {
+                    if !is_admin {
+                        if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                            let _ = tx.send("ERROR|Permission denied (admin only)".to_string()).await;
+                        }
+                        continue;
+                    }
                     let name = parts[1];
                     let mut pending = state_clone.pending_nodes.lock().await;
                     if let Some(idx) = pending.iter().position(|n| n.name == name) {
@@ -240,6 +264,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AdminState>) {
                     }
                 }
                 "reject" if parts.len() >= 2 => {
+                    if !is_admin {
+                        if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                            let _ = tx.send("ERROR|Permission denied (admin only)".to_string()).await;
+                        }
+                        continue;
+                    }
                     let name = parts[1];
                     let mut pending = state_clone.pending_nodes.lock().await;
                     if let Some(idx) = pending.iter().position(|n| n.name == name) {
@@ -300,6 +330,222 @@ async fn handle_socket(socket: WebSocket, state: Arc<AdminState>) {
                         }
                     }
                 }
+                // ========== User Management Commands (Admin Only) ==========
+                "users" => {
+                    if !is_admin {
+                        if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                            let _ = tx.send("ERROR|Permission denied (admin only)".to_string()).await;
+                        }
+                        continue;
+                    }
+                    let store = state_clone.store.lock().await;
+                    match store.list_users() {
+                        Ok(users) => {
+                            let json: Vec<_> = users.iter().map(|u| {
+                                format!(r#"{{"username":"{}","role":"{}","description":"{}","created_at":"{}"}}"#,
+                                    u.username,
+                                    u.role,
+                                    u.description.as_deref().unwrap_or(""),
+                                    u.created_at
+                                )
+                            }).collect();
+                            let msg = format!("USERS|[{}]", json.join(","));
+                            if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                let _ = tx.send(msg).await;
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                let _ = tx.send(format!("ERROR|{}", e)).await;
+                            }
+                        }
+                    }
+                }
+                "user_create" => {
+                    // user_create|username|role|description
+                    if !is_admin {
+                        if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                            let _ = tx.send("ERROR|Permission denied (admin only)".to_string()).await;
+                        }
+                        continue;
+                    }
+                    // Parse pipe-separated parts from original line
+                    let pipe_parts: Vec<&str> = line.split('|').collect();
+                    if pipe_parts.len() < 3 {
+                        if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                            let _ = tx.send("ERROR|Usage: user_create|username|role|description".to_string()).await;
+                        }
+                        continue;
+                    }
+                    let username = pipe_parts[1];
+                    let role = pipe_parts[2];
+                    let description = if pipe_parts.len() > 3 { pipe_parts[3] } else { "" };
+
+                    // Generate TOTP secret
+                    match FingerprintStore::generate_totp_secret(username) {
+                        Ok((secret, qr_png)) => {
+                            // Store pending user creation (will be confirmed with user_verify)
+                            // For now, send QR code as base64
+                            use base64::{Engine, engine::general_purpose::STANDARD};
+                            let qr_base64 = STANDARD.encode(&qr_png);
+                            let msg = format!("USER_QR|{}|{}|{}|{}|{}", username, role, description, secret, qr_base64);
+                            if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                let _ = tx.send(msg).await;
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                let _ = tx.send(format!("ERROR|{}", e)).await;
+                            }
+                        }
+                    }
+                }
+                "user_verify" => {
+                    // user_verify|username|totp_secret|role|description|code
+                    if !is_admin {
+                        if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                            let _ = tx.send("ERROR|Permission denied (admin only)".to_string()).await;
+                        }
+                        continue;
+                    }
+                    let pipe_parts: Vec<&str> = line.split('|').collect();
+                    if pipe_parts.len() < 6 {
+                        if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                            let _ = tx.send("ERROR|Usage: user_verify|username|secret|role|description|code".to_string()).await;
+                        }
+                        continue;
+                    }
+                    let username = pipe_parts[1];
+                    let secret = pipe_parts[2];
+                    let role = pipe_parts[3];
+                    let description = pipe_parts[4];
+                    let code = pipe_parts[5];
+
+                    // Verify the TOTP code
+                    match FingerprintStore::verify_totp_code(secret, code) {
+                        Ok(true) => {
+                            // Code valid - create the user
+                            let store = state_clone.store.lock().await;
+                            match store.create_user(username, secret, role, description) {
+                                Ok(()) => {
+                                    if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                        let _ = tx.send(format!("USER_CREATED|{}", username)).await;
+                                    }
+                                }
+                                Err(e) => {
+                                    if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                        let _ = tx.send(format!("ERROR|{}", e)).await;
+                                    }
+                                }
+                            }
+                        }
+                        Ok(false) => {
+                            if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                let _ = tx.send("ERROR|Invalid TOTP code".to_string()).await;
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                let _ = tx.send(format!("ERROR|{}", e)).await;
+                            }
+                        }
+                    }
+                }
+                "user_role" => {
+                    // user_role|username|role
+                    if !is_admin {
+                        if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                            let _ = tx.send("ERROR|Permission denied (admin only)".to_string()).await;
+                        }
+                        continue;
+                    }
+                    let pipe_parts: Vec<&str> = line.split('|').collect();
+                    if pipe_parts.len() < 3 {
+                        if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                            let _ = tx.send("ERROR|Usage: user_role|username|role".to_string()).await;
+                        }
+                        continue;
+                    }
+                    let username = pipe_parts[1];
+                    let role = pipe_parts[2];
+
+                    let store = state_clone.store.lock().await;
+                    match store.update_user_role(username, role) {
+                        Ok(()) => {
+                            if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                let _ = tx.send(format!("USER_UPDATED|{}", username)).await;
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                let _ = tx.send(format!("ERROR|{}", e)).await;
+                            }
+                        }
+                    }
+                }
+                "user_desc" => {
+                    // user_desc|username|description
+                    if !is_admin {
+                        if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                            let _ = tx.send("ERROR|Permission denied (admin only)".to_string()).await;
+                        }
+                        continue;
+                    }
+                    let pipe_parts: Vec<&str> = line.split('|').collect();
+                    if pipe_parts.len() < 3 {
+                        if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                            let _ = tx.send("ERROR|Usage: user_desc|username|description".to_string()).await;
+                        }
+                        continue;
+                    }
+                    let username = pipe_parts[1];
+                    let description = pipe_parts[2];
+
+                    let store = state_clone.store.lock().await;
+                    match store.update_user_description(username, description) {
+                        Ok(()) => {
+                            if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                let _ = tx.send(format!("USER_UPDATED|{}", username)).await;
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                let _ = tx.send(format!("ERROR|{}", e)).await;
+                            }
+                        }
+                    }
+                }
+                "user_delete" => {
+                    // user_delete|username
+                    if !is_admin {
+                        if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                            let _ = tx.send("ERROR|Permission denied (admin only)".to_string()).await;
+                        }
+                        continue;
+                    }
+                    let pipe_parts: Vec<&str> = line.split('|').collect();
+                    if pipe_parts.len() < 2 {
+                        if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                            let _ = tx.send("ERROR|Usage: user_delete|username".to_string()).await;
+                        }
+                        continue;
+                    }
+                    let username = pipe_parts[1];
+
+                    let store = state_clone.store.lock().await;
+                    match store.delete_user(username) {
+                        Ok(()) => {
+                            if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                let _ = tx.send(format!("USER_DELETED|{}", username)).await;
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                let _ = tx.send(format!("ERROR|{}", e)).await;
+                            }
+                        }
+                    }
+                }
                 _ => {
                     // Forward to daemon
                     let cmd = AdminCommand {
@@ -320,3 +566,4 @@ async fn handle_socket(socket: WebSocket, state: Arc<AdminState>) {
 }
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
+const ADMIN_HTML: &str = include_str!("../static/admin.html");

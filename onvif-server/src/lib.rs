@@ -464,10 +464,6 @@ async fn handle_ptz_service(
     )
 }
 
-// ============================================================================
-// Helper functions for SOAP/XML parsing
-// ============================================================================
-
 /// Extract SOAP action from ONVIF request body
 pub fn extract_soap_action(xml: &str) -> String {
     let mut reader = Reader::from_str(xml);

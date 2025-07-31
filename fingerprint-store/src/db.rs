@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use kaiju_encryption::X25519KeyPair;
 use rand::Rng;
 use rusqlite::{params, Connection};
-use sha2::{Digest, Sha256};
+use totp_rs::{Algorithm, TOTP};
 
 use crate::error::StoreError;
 
@@ -16,6 +16,21 @@ const FINGERPRINT_LEN: usize = 64;
 const MAX_NODE_NAME_LEN: usize = 64;
 /// Maximum length for approved_by field
 const MAX_APPROVED_BY_LEN: usize = 64;
+/// Maximum length for username
+const MAX_USERNAME_LEN: usize = 64;
+/// Maximum length for user description
+const MAX_DESCRIPTION_LEN: usize = 255;
+/// TOTP issuer name for QR codes
+const TOTP_ISSUER: &str = "SlingShot";
+
+/// User information
+#[derive(Debug, Clone)]
+pub struct UserInfo {
+    pub username: String,
+    pub role: String,
+    pub description: Option<String>,
+    pub created_at: String,
+}
 
 /// Validate fingerprint format (must be exactly 64 hex characters)
 fn validate_fingerprint(fingerprint: &str) -> Result<(), StoreError> {
@@ -116,11 +131,13 @@ impl FingerprintStore {
             [],
         )?;
 
-        // Admin users table
+        // Admin users table (TOTP-based authentication)
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS admin_users (
                 username TEXT PRIMARY KEY,
-                password_hash TEXT NOT NULL,
+                totp_secret TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                description TEXT,
                 created_at TEXT NOT NULL
             )",
             [],
@@ -131,6 +148,7 @@ impl FingerprintStore {
             "CREATE TABLE IF NOT EXISTS admin_sessions (
                 token TEXT PRIMARY KEY,
                 username TEXT NOT NULL,
+                role TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (username) REFERENCES admin_users(username)
             )",
@@ -360,14 +378,7 @@ impl FingerprintStore {
         }
     }
 
-    // ========== Admin User Management ==========
-
-    /// Hash a password using SHA-256
-    fn hash_password(password: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(password.as_bytes());
-        hex::encode(hasher.finalize())
-    }
+    // ========== Admin User Management (TOTP) ==========
 
     /// Generate a random session token (64 hex chars = 32 bytes)
     fn generate_session_token() -> String {
@@ -376,67 +387,305 @@ impl FingerprintStore {
         hex::encode(bytes)
     }
 
-    /// Check if any admin user exists
-    pub fn admin_exists(&self) -> Result<bool, StoreError> {
+    /// Generate a TOTP secret for a new user.
+    /// Returns (base32_secret, qr_png_bytes).
+    pub fn generate_totp_secret(username: &str) -> Result<(String, Vec<u8>), StoreError> {
+        // Generate random 20-byte secret
+        let mut rng = rand::thread_rng();
+        let secret_bytes: [u8; 20] = rng.gen();
+        let base32_secret = base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &secret_bytes);
+
+        // Create TOTP for QR code generation
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret_bytes.to_vec(),
+            Some(TOTP_ISSUER.to_string()),
+            username.to_string(),
+        )
+        .map_err(|e| StoreError::TotpError(e.to_string()))?;
+
+        // Generate QR code PNG
+        let qr_png = totp
+            .get_qr_png()
+            .map_err(|e| StoreError::TotpError(e))?;
+
+        Ok((base32_secret, qr_png))
+    }
+
+    /// Verify a TOTP code against a known secret (doesn't require database lookup).
+    /// Used during initial setup before user is created.
+    pub fn verify_totp_code(secret: &str, code: &str) -> Result<bool, StoreError> {
+        // Decode base32 secret
+        let secret_bytes = base32::decode(base32::Alphabet::Rfc4648 { padding: false }, secret)
+            .ok_or_else(|| StoreError::TotpError("Invalid base32 secret".to_string()))?;
+
+        // Create TOTP and verify
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret_bytes,
+            Some(TOTP_ISSUER.to_string()),
+            "setup".to_string(),
+        )
+        .map_err(|e| StoreError::TotpError(e.to_string()))?;
+
+        Ok(totp.check_current(code).unwrap_or(false))
+    }
+
+    /// Verify a TOTP code for a user.
+    /// Returns true if the code is valid.
+    pub fn verify_totp(&self, username: &str, code: &str) -> Result<bool, StoreError> {
+        // Get user's TOTP secret
+        let secret: String = match self.conn.query_row(
+            "SELECT totp_secret FROM admin_users WHERE username = ?",
+            [username],
+            |row| row.get(0),
+        ) {
+            Ok(s) => s,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+
+        // Decode base32 secret
+        let secret_bytes = base32::decode(base32::Alphabet::Rfc4648 { padding: false }, &secret)
+            .ok_or_else(|| StoreError::TotpError("Invalid base32 secret".to_string()))?;
+
+        // Create TOTP and verify
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret_bytes,
+            Some(TOTP_ISSUER.to_string()),
+            username.to_string(),
+        )
+        .map_err(|e| StoreError::TotpError(e.to_string()))?;
+
+        Ok(totp.check_current(code).unwrap_or(false))
+    }
+
+    /// Check if any users exist
+    pub fn any_users_exist(&self) -> Result<bool, StoreError> {
         let count: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM admin_users", [], |row| row.get(0))?;
         Ok(count > 0)
     }
 
-    /// Create an admin user with the given username and password
-    pub fn create_admin_user(&self, username: &str, password: &str) -> Result<(), StoreError> {
-        let password_hash = Self::hash_password(password);
+    /// Count admin users (for last-admin protection)
+    pub fn count_admins(&self) -> Result<usize, StoreError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM admin_users WHERE role = 'admin'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// Create a user with TOTP authentication
+    pub fn create_user(
+        &self,
+        username: &str,
+        totp_secret: &str,
+        role: &str,
+        description: &str,
+    ) -> Result<(), StoreError> {
+        // Validate field lengths
+        if username.len() > MAX_USERNAME_LEN {
+            return Err(StoreError::FieldTooLong {
+                field: "username",
+                max: MAX_USERNAME_LEN,
+                actual: username.len(),
+            });
+        }
+        if description.len() > MAX_DESCRIPTION_LEN {
+            return Err(StoreError::FieldTooLong {
+                field: "description",
+                max: MAX_DESCRIPTION_LEN,
+                actual: description.len(),
+            });
+        }
+        if role != "admin" && role != "user" {
+            return Err(StoreError::InvalidRole(role.to_string()));
+        }
+
         let now = Utc::now().to_rfc3339();
+        let desc = if description.is_empty() {
+            None
+        } else {
+            Some(description)
+        };
 
         self.conn.execute(
-            "INSERT INTO admin_users (username, password_hash, created_at) VALUES (?1, ?2, ?3)",
-            params![username, password_hash, now],
+            "INSERT INTO admin_users (username, totp_secret, role, description, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![username, totp_secret, role, desc, now],
         )?;
 
         Ok(())
     }
 
-    /// Verify admin credentials
-    pub fn verify_admin(&self, username: &str, password: &str) -> Result<bool, StoreError> {
-        let password_hash = Self::hash_password(password);
-
-        let result: Result<String, _> = self.conn.query_row(
-            "SELECT password_hash FROM admin_users WHERE username = ?",
+    /// Get user info by username
+    pub fn get_user(&self, username: &str) -> Result<Option<UserInfo>, StoreError> {
+        let result = self.conn.query_row(
+            "SELECT username, role, description, created_at FROM admin_users WHERE username = ?",
             [username],
-            |row| row.get(0),
+            |row| {
+                Ok(UserInfo {
+                    username: row.get(0)?,
+                    role: row.get(1)?,
+                    description: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            },
         );
 
         match result {
-            Ok(stored_hash) => Ok(stored_hash == password_hash),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Ok(user) => Ok(Some(user)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
 
+    /// List all users
+    pub fn list_users(&self) -> Result<Vec<UserInfo>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT username, role, description, created_at FROM admin_users ORDER BY created_at",
+        )?;
+
+        let users = stmt
+            .query_map([], |row| {
+                Ok(UserInfo {
+                    username: row.get(0)?,
+                    role: row.get(1)?,
+                    description: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(users)
+    }
+
+    /// Update user role
+    pub fn update_user_role(&self, username: &str, role: &str) -> Result<(), StoreError> {
+        if role != "admin" && role != "user" {
+            return Err(StoreError::InvalidRole(role.to_string()));
+        }
+
+        // Check last admin protection
+        if role == "user" {
+            let user = self.get_user(username)?;
+            if let Some(u) = user {
+                if u.role == "admin" && self.count_admins()? <= 1 {
+                    return Err(StoreError::LastAdmin);
+                }
+            }
+        }
+
+        let rows = self.conn.execute(
+            "UPDATE admin_users SET role = ? WHERE username = ?",
+            params![role, username],
+        )?;
+
+        if rows == 0 {
+            return Err(StoreError::NotFound(username.to_string()));
+        }
+
+        Ok(())
+    }
+
+    /// Update user description
+    pub fn update_user_description(&self, username: &str, description: &str) -> Result<(), StoreError> {
+        if description.len() > MAX_DESCRIPTION_LEN {
+            return Err(StoreError::FieldTooLong {
+                field: "description",
+                max: MAX_DESCRIPTION_LEN,
+                actual: description.len(),
+            });
+        }
+
+        let desc = if description.is_empty() {
+            None
+        } else {
+            Some(description)
+        };
+
+        let rows = self.conn.execute(
+            "UPDATE admin_users SET description = ? WHERE username = ?",
+            params![desc, username],
+        )?;
+
+        if rows == 0 {
+            return Err(StoreError::NotFound(username.to_string()));
+        }
+
+        Ok(())
+    }
+
+    /// Delete a user
+    pub fn delete_user(&self, username: &str) -> Result<(), StoreError> {
+        // Check last admin protection
+        let user = self.get_user(username)?;
+        if let Some(u) = user {
+            if u.role == "admin" && self.count_admins()? <= 1 {
+                return Err(StoreError::LastAdmin);
+            }
+        } else {
+            return Err(StoreError::NotFound(username.to_string()));
+        }
+
+        // Delete sessions first (foreign key)
+        self.conn.execute(
+            "DELETE FROM admin_sessions WHERE username = ?",
+            [username],
+        )?;
+
+        // Delete user
+        self.conn.execute(
+            "DELETE FROM admin_users WHERE username = ?",
+            [username],
+        )?;
+
+        Ok(())
+    }
+
     /// Create a new session for a user, returns the session token
     pub fn create_session(&self, username: &str) -> Result<String, StoreError> {
+        // Get user's role
+        let role: String = self.conn.query_row(
+            "SELECT role FROM admin_users WHERE username = ?",
+            [username],
+            |row| row.get(0),
+        )?;
+
         let token = Self::generate_session_token();
         let now = Utc::now().to_rfc3339();
 
         self.conn.execute(
-            "INSERT INTO admin_sessions (token, username, created_at) VALUES (?1, ?2, ?3)",
-            params![token, username, now],
+            "INSERT INTO admin_sessions (token, username, role, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![token, username, role, now],
         )?;
 
         Ok(token)
     }
 
-    /// Verify a session token, returns the username if valid
-    pub fn verify_session(&self, token: &str) -> Result<Option<String>, StoreError> {
-        let result: Result<String, _> = self.conn.query_row(
-            "SELECT username FROM admin_sessions WHERE token = ?",
+    /// Verify a session token, returns (username, role) if valid
+    pub fn verify_session(&self, token: &str) -> Result<Option<(String, String)>, StoreError> {
+        let result = self.conn.query_row(
+            "SELECT username, role FROM admin_sessions WHERE token = ?",
             [token],
-            |row| row.get(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         );
 
         match result {
-            Ok(username) => Ok(Some(username)),
+            Ok((username, role)) => Ok(Some((username, role))),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -584,5 +833,110 @@ mod tests {
         // Should not error on validation (may return None since not approved)
         let result = store.is_approved(&valid);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_totp_generation_and_verification() {
+        // Generate a TOTP secret
+        let (secret, qr_png) = FingerprintStore::generate_totp_secret("testuser").unwrap();
+
+        // Secret should be base32 encoded (uppercase letters A-Z and digits 2-7)
+        assert!(!secret.is_empty());
+        assert!(secret.chars().all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c)));
+
+        // QR PNG should be valid PNG data
+        assert!(!qr_png.is_empty());
+        assert!(qr_png.starts_with(&[0x89, b'P', b'N', b'G'])); // PNG magic bytes
+
+        // Generate a valid code and verify it
+        let secret_bytes = base32::decode(base32::Alphabet::Rfc4648 { padding: false }, &secret).unwrap();
+        let totp = totp_rs::TOTP::new(
+            totp_rs::Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret_bytes,
+            Some("SlingShot".to_string()),
+            "testuser".to_string(),
+        ).unwrap();
+
+        let code = totp.generate_current().unwrap();
+        assert!(FingerprintStore::verify_totp_code(&secret, &code).unwrap());
+
+        // Wrong code should fail
+        assert!(!FingerprintStore::verify_totp_code(&secret, "000000").unwrap());
+    }
+
+    #[test]
+    fn test_user_creation_and_totp_auth() {
+        let (store, _dir) = test_store();
+
+        // Initially no users exist
+        assert!(store.any_users_exist().is_ok());
+        assert!(!store.any_users_exist().unwrap());
+
+        // Generate TOTP secret
+        let (secret, _) = FingerprintStore::generate_totp_secret("admin").unwrap();
+
+        // Create admin user
+        store.create_user("admin", &secret, "admin", "Test admin").unwrap();
+
+        // Now users exist
+        assert!(store.any_users_exist().unwrap());
+
+        // Can get user info
+        let user = store.get_user("admin").unwrap().unwrap();
+        assert_eq!(user.username, "admin");
+        assert_eq!(user.role, "admin");
+        assert_eq!(user.description.as_deref(), Some("Test admin"));
+
+        // Admin count is 1
+        assert_eq!(store.count_admins().unwrap(), 1);
+
+        // List users returns the admin
+        let users = store.list_users().unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].username, "admin");
+
+        // TOTP verification works
+        let secret_bytes = base32::decode(base32::Alphabet::Rfc4648 { padding: false }, &secret).unwrap();
+        let totp = totp_rs::TOTP::new(
+            totp_rs::Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret_bytes,
+            Some("SlingShot".to_string()),
+            "admin".to_string(),
+        ).unwrap();
+        let code = totp.generate_current().unwrap();
+        assert!(store.verify_totp("admin", &code).unwrap());
+    }
+
+    #[test]
+    fn test_last_admin_protection() {
+        let (store, _dir) = test_store();
+
+        let (secret, _) = FingerprintStore::generate_totp_secret("admin").unwrap();
+        store.create_user("admin", &secret, "admin", "").unwrap();
+
+        // Cannot demote last admin
+        let result = store.update_user_role("admin", "user");
+        assert!(matches!(result, Err(StoreError::LastAdmin)));
+
+        // Cannot delete last admin
+        let result = store.delete_user("admin");
+        assert!(matches!(result, Err(StoreError::LastAdmin)));
+
+        // Create second admin
+        let (secret2, _) = FingerprintStore::generate_totp_secret("admin2").unwrap();
+        store.create_user("admin2", &secret2, "admin", "").unwrap();
+
+        // Now can demote first admin
+        assert!(store.update_user_role("admin", "user").is_ok());
+
+        // But cannot demote/delete the remaining admin
+        let result = store.update_user_role("admin2", "user");
+        assert!(matches!(result, Err(StoreError::LastAdmin)));
     }
 }

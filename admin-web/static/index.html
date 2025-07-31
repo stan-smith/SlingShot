@@ -385,7 +385,7 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
   <div class="login-box">
     <h2>SlingShot Admin</h2>
     <input type="text" id="login-username" placeholder="Username" value="admin">
-    <input type="password" id="login-password" placeholder="Password" onkeydown="if(event.key==='Enter')login()">
+    <input type="text" id="login-totp" placeholder="6-digit code" maxlength="6" onkeydown="if(event.key==='Enter')login()" autocomplete="off">
     <button onclick="login()">Login</button>
     <div id="login-error" class="login-error"></div>
   </div>
@@ -397,6 +397,7 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
     <div class="status">
       <div class="status-dot" id="status-dot"></div>
       <span id="status-text">Disconnected</span>
+      <a href="/admin" id="admin-link" class="logout-btn" style="display:none">Users</a>
       <button id="logout-btn" class="logout-btn" onclick="logout()" style="display:none">Logout</button>
     </div>
   </header>
@@ -562,6 +563,7 @@ let ptzContinuous = false;
 // Authentication state
 let sessionToken = localStorage.getItem('admin_session');
 let pendingCredentials = null;
+let userRole = null;
 
 // DOM elements
 const log = document.getElementById('log');
@@ -571,6 +573,7 @@ const statusText = document.getElementById('status-text');
 const loginOverlay = document.getElementById('login-overlay');
 const loginError = document.getElementById('login-error');
 const logoutBtn = document.getElementById('logout-btn');
+const adminLink = document.getElementById('admin-link');
 
 // Initialize
 setupTabs();
@@ -581,19 +584,24 @@ if (sessionToken) {
 
 function login() {
   const username = document.getElementById('login-username').value;
-  const password = document.getElementById('login-password').value;
-  if (!username || !password) {
-    loginError.textContent = 'Please enter username and password';
+  const code = document.getElementById('login-totp').value;
+  if (!username || !code) {
+    loginError.textContent = 'Please enter username and 6-digit code';
+    return;
+  }
+  if (code.length !== 6 || !/^\d+$/.test(code)) {
+    loginError.textContent = 'Code must be 6 digits';
     return;
   }
   loginError.textContent = '';
-  pendingCredentials = { username, password };
+  pendingCredentials = { username, code };
   connectWebSocket();
 }
 
 function logout() {
   localStorage.removeItem('admin_session');
   sessionToken = null;
+  userRole = null;
   if (ws) ws.close();
   location.reload();
 }
@@ -605,7 +613,7 @@ function connectWebSocket() {
     if (sessionToken) {
       ws.send(`TOKEN|${sessionToken}`);
     } else if (pendingCredentials) {
-      ws.send(`AUTH|${pendingCredentials.username}|${pendingCredentials.password}`);
+      ws.send(`TOTP|${pendingCredentials.username}|${pendingCredentials.code}`);
       pendingCredentials = null;
     }
   };
@@ -626,26 +634,35 @@ function handleMessage(e) {
   const msg = e.data;
   // Handle authentication responses first
   if (msg.startsWith('AUTH_OK|')) {
-    const token = msg.split('|')[1];
+    const parts = msg.split('|');
+    const token = parts[1];
+    const role = parts[2] || 'user';
     if (token) {
       sessionToken = token;
       localStorage.setItem('admin_session', token);
     }
+    userRole = role;
     // Hide login overlay, show logout button
     loginOverlay.style.display = 'none';
     logoutBtn.style.display = 'block';
+    // Show admin link only for admins
+    if (role === 'admin') {
+      adminLink.style.display = 'block';
+    }
     statusDot.classList.add('connected');
     statusText.textContent = 'Connected';
-    append('--- Authenticated ---', 'system');
+    append('--- Authenticated as ' + role + ' ---', 'system');
     ws.send('nodes');
     return;
   } else if (msg === 'AUTH_FAILED') {
     // Clear invalid session
     localStorage.removeItem('admin_session');
     sessionToken = null;
+    userRole = null;
     // Show login overlay with error
     loginOverlay.style.display = 'flex';
     logoutBtn.style.display = 'none';
+    adminLink.style.display = 'none';
     loginError.textContent = 'Invalid credentials';
     if (ws) ws.close();
     return;
