@@ -915,20 +915,25 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                             }
                             println!("Encryption key received and stored");
 
-                            // Create segment encryptor with the new key
+                            // Create or update segment encryptor with the new key
                             // Note: We intentionally DON'T call scan_existing() here so that
                             // any plaintext recordings made before receiving the key will be
                             // encrypted by process_completed() as new recordings come in.
-                            if segment_encryptor.is_none() {
-                                if let Some(ref rec) = recorder {
-                                    let rec_config = rec.config();
-                                    let enc = SegmentEncryptor::new(
-                                        rec_config.output_dir.clone(),
-                                        rec_config.file_format.clone(),
-                                        pubkey_hex.to_string(),
-                                    );
-                                    segment_encryptor = Some(enc);
+                            // Always replace the encryptor in case the key changed (e.g., after
+                            // central database was wiped and regenerated a new key).
+                            if let Some(ref rec) = recorder {
+                                let rec_config = rec.config();
+                                let enc = SegmentEncryptor::new(
+                                    rec_config.output_dir.clone(),
+                                    rec_config.file_format.clone(),
+                                    pubkey_hex.to_string(),
+                                );
+                                let was_new = segment_encryptor.is_none();
+                                segment_encryptor = Some(enc);
+                                if was_new {
                                     println!("Recording encryption enabled with new key");
+                                } else {
+                                    println!("Recording encryption key updated");
                                 }
                             }
                         }
