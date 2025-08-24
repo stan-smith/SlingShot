@@ -1,5 +1,5 @@
 use anyhow::Result;
-use config_manager::CentralConfig;
+use config_manager::{generate_random_password, CentralConfig, OnvifAuthConfig};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use fingerprint_store::FingerprintStore;
 use qrcode::QrCode;
@@ -152,6 +152,9 @@ fn finish_wizard(existing: Option<CentralConfig>, bind_interface: String) -> Res
         // Setup admin user if not exists
         setup_admin_user()?;
 
+        // Setup ONVIF credentials
+        setup_onvif_credentials()?;
+
         println!();
         println!("Restart the central node for changes to take effect.");
     } else {
@@ -231,6 +234,50 @@ fn setup_admin_user() -> Result<()> {
             println!("Invalid code. Please try again.");
         }
     }
+
+    Ok(())
+}
+
+/// Setup ONVIF credentials for VMS authentication
+fn setup_onvif_credentials() -> Result<()> {
+    println!();
+    println!("=== ONVIF Credentials ===");
+    println!();
+
+    if OnvifAuthConfig::exists() {
+        let existing = OnvifAuthConfig::load()?;
+        println!("Current ONVIF username: {}", existing.username);
+        println!();
+
+        let regenerate = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Regenerate ONVIF credentials?")
+            .default(false)
+            .interact()?;
+
+        if !regenerate {
+            println!("ONVIF credentials unchanged.");
+            return Ok(());
+        }
+    }
+
+    let username: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("ONVIF username")
+        .default("onvif".to_string())
+        .interact_text()?;
+
+    let password = generate_random_password(16);
+
+    let auth = OnvifAuthConfig::new(&username, &password);
+    auth.save()?;
+
+    println!();
+    println!("ONVIF credentials saved.");
+    println!();
+    println!("Configure these in your VMS to access ONVIF endpoints:");
+    println!("  Username: {}", username);
+    println!("  Password: {}", password);
+    println!();
+    println!("(Keep these credentials secure)");
 
     Ok(())
 }

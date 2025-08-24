@@ -11,4 +11,5 @@ dirs = "5"
 base64 = "0.22"
 thiserror = "2"
 hex = "0.4"
+rand = "0.8"
 adaptive-bitrate = { path = "../adaptive-bitrate" }

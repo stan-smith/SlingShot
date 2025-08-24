@@ -3,6 +3,7 @@ mod encryption;
 mod error;
 mod identity;
 mod obfuscate;
+mod onvif_auth;
 mod paths;
 mod pinned_cert;
 mod source;
@@ -13,6 +14,7 @@ pub use config::{AdaptiveConfig, AdaptivePriority, CentralConfig, RecordingConfi
 pub use encryption::EncryptionConfig;
 pub use error::ConfigError;
 pub use identity::IdentityConfig;
+pub use onvif_auth::{generate_random_password, OnvifAuthConfig};
 pub use paths::{central_config_path, config_dir, ensure_config_dir, remote_config_path, write_secure};
 pub use pinned_cert::PinnedCertConfig;
 pub use source::{OnvifConfig, RtspConfig, SourceConfig};

@@ -2,6 +2,8 @@
 //!
 //! Presents connected remote nodes as virtual ONVIF cameras to VMS systems.
 //! Translates ONVIF PTZ commands to an internal command protocol.
+//!
+//! All endpoints require WS-Security UsernameToken authentication.
 
 use axum::{
     extract::{Path, State},
@@ -17,6 +19,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
+/// Maximum age of WS-Security timestamps (5 minutes)
+const MAX_REQUEST_AGE_SECS: u64 = 300;
+
 /// Handle to a connected remote node for sending commands
 #[derive(Clone)]
 pub struct NodeHandle {
@@ -28,6 +33,7 @@ pub struct NodeHandle {
 pub struct OnvifServerState {
     pub nodes: Arc<Mutex<HashMap<String, NodeHandle>>>,
     pub local_ip: String,
+    pub credentials: ws_security::Credentials,
 }
 
 /// Start the ONVIF HTTP server
@@ -35,8 +41,13 @@ pub async fn run_onvif_server(
     addr: SocketAddr,
     nodes: Arc<Mutex<HashMap<String, NodeHandle>>>,
     local_ip: String,
+    credentials: ws_security::Credentials,
 ) -> anyhow::Result<()> {
-    let state = Arc::new(OnvifServerState { nodes, local_ip });
+    let state = Arc::new(OnvifServerState {
+        nodes,
+        local_ip,
+        credentials,
+    });
 
     let app = Router::new()
         // Per-node endpoints
@@ -55,11 +66,49 @@ pub async fn run_onvif_server(
     Ok(())
 }
 
+/// Check WS-Security authentication
+fn check_auth(body: &str, state: &OnvifServerState) -> Result<(), String> {
+    ws_security::authenticate(body, &state.credentials, MAX_REQUEST_AGE_SECS)
+        .map_err(|e| e.to_string())
+}
+
+/// Generate SOAP authentication fault response
+fn soap_auth_fault(reason: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
+  <s:Body>
+    <s:Fault>
+      <s:Code>
+        <s:Value>s:Sender</s:Value>
+        <s:Subcode>
+          <s:Value>wsse:FailedAuthentication</s:Value>
+        </s:Subcode>
+      </s:Code>
+      <s:Reason>
+        <s:Text xml:lang="en">{}</s:Text>
+      </s:Reason>
+    </s:Fault>
+  </s:Body>
+</s:Envelope>"#,
+        reason
+    )
+}
+
 /// Handle discovery requests (list all nodes)
 async fn handle_discovery(
     State(state): State<Arc<OnvifServerState>>,
     body: String,
 ) -> impl IntoResponse {
+    // Check authentication
+    if let Err(reason) = check_auth(&body, &state) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [("Content-Type", "application/soap+xml")],
+            soap_auth_fault(&reason),
+        );
+    }
+
     let action = extract_soap_action(&body);
     println!("[ONVIF] Discovery: {}", action);
 
@@ -109,6 +158,15 @@ async fn handle_device_service(
     State(state): State<Arc<OnvifServerState>>,
     body: String,
 ) -> impl IntoResponse {
+    // Check authentication
+    if let Err(reason) = check_auth(&body, &state) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [("Content-Type", "application/soap+xml")],
+            soap_auth_fault(&reason),
+        );
+    }
+
     let action = extract_soap_action(&body);
     println!("[ONVIF] Device service for '{}': {}", node, action);
 
@@ -182,6 +240,15 @@ async fn handle_media_service(
     State(state): State<Arc<OnvifServerState>>,
     body: String,
 ) -> impl IntoResponse {
+    // Check authentication
+    if let Err(reason) = check_auth(&body, &state) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [("Content-Type", "application/soap+xml")],
+            soap_auth_fault(&reason),
+        );
+    }
+
     let action = extract_soap_action(&body);
     println!("[ONVIF] Media service for '{}': {}", node, action);
 
@@ -261,6 +328,15 @@ async fn handle_ptz_service(
     State(state): State<Arc<OnvifServerState>>,
     body: String,
 ) -> impl IntoResponse {
+    // Check authentication
+    if let Err(reason) = check_auth(&body, &state) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [("Content-Type", "application/soap+xml")],
+            soap_auth_fault(&reason),
+        );
+    }
+
     let action = extract_soap_action(&body);
     println!("[ONVIF] PTZ service for '{}': {}", node, action);
 

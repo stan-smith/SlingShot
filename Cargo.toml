@@ -17,4 +17,5 @@ members = [
     "fingerprint-store",
     "kaiju-encryption",
     "adaptive-bitrate",
+    "ws-security",
 ]

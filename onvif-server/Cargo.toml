@@ -11,6 +11,9 @@ axum = "0.8"
 # XML parsing for SOAP
 quick-xml = "0.37"
 
+# WS-Security authentication
+ws-security = { path = "../ws-security" }
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 

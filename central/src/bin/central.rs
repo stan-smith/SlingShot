@@ -1,6 +1,6 @@
 use admin_web::{broadcast, request_approval, run_admin_server, AdminCommand, AdminState};
 use anyhow::Result;
-use config_manager::{CentralConfig, TlsCertConfig};
+use config_manager::{CentralConfig, OnvifAuthConfig, TlsCertConfig};
 use fingerprint_store::FingerprintStore;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSrc;
@@ -179,13 +179,30 @@ async fn async_main() -> Result<()> {
     // Get local IP for ONVIF server
     let local_ip = get_local_ip().unwrap_or_else(|| "127.0.0.1".to_string());
 
+    // Load or generate ONVIF credentials
+    let onvif_auth = if OnvifAuthConfig::exists() {
+        OnvifAuthConfig::load()?
+    } else {
+        let auth = OnvifAuthConfig::generate_default();
+        auth.save()?;
+        println!("Generated ONVIF credentials:");
+        println!("  Username: {}", auth.username);
+        println!("  Password: {}", auth.password);
+        println!("  (Configure these in your VMS to access ONVIF endpoints)");
+        auth
+    };
+    let onvif_credentials = ws_security::Credentials {
+        username: onvif_auth.username.clone(),
+        password: onvif_auth.password.clone(),
+    };
+
     // Start ONVIF server
     let onvif_addr: SocketAddr = config.onvif_addrs().into_iter().next()
         .unwrap_or_else(|| format!("0.0.0.0:{}", config.onvif_port))
         .parse()?;
     let onvif_nodes_clone = Arc::clone(&onvif_nodes);
     tokio::spawn(async move {
-        if let Err(e) = run_onvif_server(onvif_addr, onvif_nodes_clone, local_ip).await {
+        if let Err(e) = run_onvif_server(onvif_addr, onvif_nodes_clone, local_ip, onvif_credentials).await {
             eprintln!("ONVIF server error: {}", e);
         }
     });

@@ -31,6 +31,9 @@ anyhow = "1"
 # ONVIF server
 onvif-server = { path = "../onvif-server" }
 
+# WS-Security authentication
+ws-security = { path = "../ws-security" }
+
 # Admin web interface
 admin-web = { path = "../admin-web" }
 
