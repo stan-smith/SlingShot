@@ -543,6 +543,7 @@ async fn handle_ptz_service(
 /// Extract SOAP action from ONVIF request body
 pub fn extract_soap_action(xml: &str) -> String {
     let mut reader = Reader::from_str(xml);
+    let mut in_body = false;
 
     loop {
         match reader.read_event() {
@@ -550,9 +551,22 @@ pub fn extract_soap_action(xml: &str) -> String {
                 let local_name = e.local_name();
                 let name = String::from_utf8_lossy(local_name.as_ref()).to_string();
 
-                // Skip envelope and body tags
-                if name != "Envelope" && name != "Body" && name != "Header" && name != "Security" {
+                // Track when we enter the Body element
+                if name == "Body" {
+                    in_body = true;
+                    continue;
+                }
+
+                // Only return actions from within the Body
+                if in_body && name != "Envelope" {
                     return name;
+                }
+            }
+            Ok(Event::End(e)) => {
+                let local_name = e.local_name();
+                let name = String::from_utf8_lossy(local_name.as_ref()).to_string();
+                if name == "Body" {
+                    in_body = false;
                 }
             }
             Ok(Event::Eof) => break,
