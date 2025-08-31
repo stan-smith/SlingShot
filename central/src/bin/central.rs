@@ -1,6 +1,7 @@
 use admin_web::{broadcast, request_approval, run_admin_server, AdminCommand, AdminState};
 use anyhow::Result;
-use config_manager::{CentralConfig, OnvifAuthConfig, TlsCertConfig};
+use config_manager::{sign_command, CentralConfig, IdentityConfig, OnvifAuthConfig, TlsCertConfig};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use fingerprint_store::FingerprintStore;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSrc;
@@ -208,6 +209,23 @@ async fn async_main() -> Result<()> {
     });
     println!("ONVIF server listening on http://{}", onvif_addr);
 
+    // Load or generate command signing identity
+    let central_signing_key: Arc<SigningKey> = {
+        if IdentityConfig::exists() {
+            let identity = IdentityConfig::load()?;
+            let secret_bytes = identity.secret_bytes()?;
+            Arc::new(SigningKey::from_bytes(&secret_bytes))
+        } else {
+            let secret_bytes: [u8; 32] = rand::random();
+            let identity = IdentityConfig::new(&secret_bytes);
+            identity.save()?;
+            Arc::new(SigningKey::from_bytes(&secret_bytes))
+        }
+    };
+    let central_verifying_key = VerifyingKey::from(&*central_signing_key);
+    let central_fingerprint = hex::encode(central_verifying_key.as_bytes());
+    println!("Command signing fingerprint: {}...", &central_fingerprint[..16]);
+
     // Create admin state and channel
     let (admin_cmd_tx, mut admin_cmd_rx) = mpsc::channel::<AdminCommand>(100);
     let admin_state = Arc::new(AdminState::new(admin_cmd_tx, Arc::clone(&fingerprint_store)));
@@ -250,6 +268,8 @@ async fn async_main() -> Result<()> {
     let mounts_clone = Arc::clone(&mounts);
     let admin_state_conn = Arc::clone(&admin_state);
     let fingerprint_store_conn = Arc::clone(&fingerprint_store);
+    let signing_key_conn = Arc::clone(&central_signing_key);
+    let central_fp_conn = central_fingerprint.clone();
     let endpoint_clone = endpoint.clone();
     tokio::spawn(async move {
         loop {
@@ -259,9 +279,11 @@ async fn async_main() -> Result<()> {
                 let mounts = Arc::clone(&mounts_clone);
                 let admin_state = Arc::clone(&admin_state_conn);
                 let fp_store = Arc::clone(&fingerprint_store_conn);
+                let signing_key = Arc::clone(&signing_key_conn);
+                let central_fp = central_fp_conn.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
-                        handle_connection(incoming, nodes, onvif_nodes, mounts, admin_state, fp_store, debug).await
+                        handle_connection(incoming, nodes, onvif_nodes, mounts, admin_state, fp_store, signing_key, central_fp, debug).await
                     {
                         eprintln!("Connection error: {}", e);
                     }
@@ -325,8 +347,8 @@ async fn async_main() -> Result<()> {
                         let nodes = nodes.lock().await;
                         if let Some(node) = nodes.get(node_name) {
                             let cmd = parts[1..].join(" ");
-                            let msg = format!("CMD|{}", cmd);
-                            if let Err(e) = node.cmd_tx.send(msg).await {
+                            // Send raw command - will be signed in handle_connection
+                            if let Err(e) = node.cmd_tx.send(cmd).await {
                                 eprintln!("Failed to send command: {}", e);
                             }
                         } else {
@@ -379,8 +401,8 @@ async fn process_command(
             let nodes = nodes.lock().await;
             if let Some(node) = nodes.get(node_name) {
                 let cmd = parts[1..].join(" ");
-                let msg = format!("CMD|{}", cmd);
-                if let Err(e) = node.cmd_tx.send(msg).await {
+                // Send raw command - will be signed in handle_connection
+                if let Err(e) = node.cmd_tx.send(cmd).await {
                     Some(format!("Failed to send command: {}", e))
                 } else {
                     None // Response will come via node's response handler
@@ -399,6 +421,8 @@ async fn handle_connection(
     mounts: Arc<gstreamer_rtsp_server::RTSPMountPoints>,
     admin_state: Arc<AdminState>,
     fingerprint_store: Arc<tokio::sync::Mutex<FingerprintStore>>,
+    signing_key: Arc<SigningKey>,
+    central_fingerprint: String,
     debug: bool,
 ) -> Result<()> {
     let connection = incoming.await?;
@@ -515,12 +539,12 @@ async fn handle_connection(
             None
         };
 
-        // Build response: APPROVED|message or APPROVED|message|pubkey_hex
-        let response = if let Some(ref pubkey) = encryption_pubkey {
-            format!("APPROVED|Welcome, {}!|{}", node_name, pubkey)
-        } else {
-            format!("APPROVED|Welcome, {}!", node_name)
-        };
+        // Build response: APPROVED|message|enc_pubkey|central_fingerprint
+        let enc_field = encryption_pubkey.as_ref().map(|p| p.as_str()).unwrap_or("");
+        let response = format!(
+            "APPROVED|Welcome, {}!|{}|{}",
+            node_name, enc_field, central_fingerprint
+        );
         send_stream.write_all(response.as_bytes()).await?;
         send_stream.finish()?;
 
@@ -724,10 +748,11 @@ async fn handle_connection(
                     }
                 }
 
-                // Send commands to remote
+                // Send commands to remote (signed)
                 Some(cmd) = cmd_rx.recv() => {
+                    let signed_cmd = sign_command(&signing_key, &cmd);
                     let mut send_stream = connection.open_uni().await?;
-                    send_stream.write_all(cmd.as_bytes()).await?;
+                    send_stream.write_all(signed_cmd.as_bytes()).await?;
                     send_stream.finish()?;
                 }
 

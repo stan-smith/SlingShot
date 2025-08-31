@@ -4,8 +4,9 @@ use adaptive_bitrate::{AdaptiveController, QualityChange};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use config_manager::{
-    EncryptionConfig, IdentityConfig, OnvifConfig, PinnedCertConfig, RemoteConfig, RtspConfig,
-    SourceConfig, StorageConfig as CfgStorageConfig,
+    verify_command, CentralPubkeyConfig, CommandAuthError, EncryptionConfig, IdentityConfig,
+    OnvifConfig, PinnedCertConfig, RemoteConfig, RtspConfig, SourceConfig,
+    StorageConfig as CfgStorageConfig,
 };
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use ffmpeg_recorder::{ensure_disk_space, Recorder, RecorderConfig, SegmentEncryptor};
@@ -878,7 +879,7 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
         );
 
         // Wait for approval/denial
-        // Response format: APPROVED|message or APPROVED|message|pubkey_hex
+        // Response format: APPROVED|message|enc_pubkey|central_fingerprint
         let mut recv_stream = match connection.accept_uni().await {
             Ok(s) => s,
             Err(e) => {
@@ -949,6 +950,55 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                     break 'reconnect;
                 }
             }
+
+            // Parse and store central's command signing fingerprint (TOFU model)
+            let central_verifying_key: Option<VerifyingKey> = if parts.len() >= 4 && !parts[3].is_empty() {
+                let central_fp = parts[3];
+                if CentralPubkeyConfig::exists() {
+                    match CentralPubkeyConfig::load() {
+                        Ok(stored) => {
+                            if stored.ed25519_pubkey != central_fp {
+                                eprintln!("[SECURITY] Central fingerprint mismatch!");
+                                eprintln!("  Stored:   {}...", &stored.ed25519_pubkey[..16]);
+                                eprintln!("  Received: {}...", &central_fp[..16]);
+                                eprintln!("This could indicate a man-in-the-middle attack.");
+                                eprintln!("If central was legitimately reinstalled, delete:");
+                                eprintln!("  ~/.config/kaiju/central-pubkey.toml");
+                                break 'reconnect;
+                            }
+                            // Load verifying key from stored fingerprint
+                            stored.pubkey_bytes().ok()
+                                .and_then(|b| VerifyingKey::from_bytes(&b).ok())
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to load central pubkey: {}", e);
+                            None
+                        }
+                    }
+                } else {
+                    // TOFU: First connection, store the fingerprint
+                    match CentralPubkeyConfig::new(central_fp) {
+                        Ok(config) => {
+                            if let Err(e) = config.save() {
+                                eprintln!("Failed to save central fingerprint: {}", e);
+                            } else {
+                                println!("Central fingerprint stored: {}...", &central_fp[..16]);
+                            }
+                            config.pubkey_bytes().ok()
+                                .and_then(|b| VerifyingKey::from_bytes(&b).ok())
+                        }
+                        Err(e) => {
+                            eprintln!("Invalid central fingerprint: {}", e);
+                            None
+                        }
+                    }
+                }
+            } else {
+                // Legacy central without command signing
+                eprintln!("Warning: Central did not provide command signing fingerprint");
+                eprintln!("Commands will not be authenticated (less secure)");
+                None
+            };
 
             // Send confirmation
             let mut confirm_stream = match connection.open_uni().await {
@@ -1059,7 +1109,23 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                                 }
 
                                 if msg.starts_with("CMD|") {
-                                    let cmd = msg.strip_prefix("CMD|").unwrap_or("");
+                                    // Verify command signature
+                                    let cmd = if let Some(ref vk) = central_verifying_key {
+                                        match verify_command(vk, &msg) {
+                                            Ok(verified_cmd) => verified_cmd,
+                                            Err(CommandAuthError::Expired) => {
+                                                eprintln!("Rejected: Command expired (replay protection)");
+                                                continue;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("Rejected: Command verification failed: {:?}", e);
+                                                continue;
+                                            }
+                                        }
+                                    } else {
+                                        // Legacy mode: no signature verification (fallback)
+                                        msg.strip_prefix("CMD|").unwrap_or("").to_string()
+                                    };
                                     println!("Received command: {}", cmd);
 
                                     // Check for recordings command (needs special handling)
@@ -1079,7 +1145,7 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                                             let _ = send_stream.finish();
                                         }
                                     } else {
-                                        let result = handle_command(cmd, &onvif, &pipeline_state);
+                                        let result = handle_command(&cmd, &onvif, &pipeline_state);
 
                                         // Send result back
                                         let response = match result {

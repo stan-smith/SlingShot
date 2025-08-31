@@ -13,3 +13,4 @@ thiserror = "2"
 hex = "0.4"
 rand = "0.8"
 adaptive-bitrate = { path = "../adaptive-bitrate" }
+ed25519-dalek = { version = "2", features = ["rand_core"] }

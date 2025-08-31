@@ -1,3 +1,5 @@
+mod central_pubkey;
+mod command_auth;
 mod config;
 mod encryption;
 mod error;
@@ -10,6 +12,8 @@ mod source;
 mod storage;
 mod tls_cert;
 
+pub use central_pubkey::CentralPubkeyConfig;
+pub use command_auth::{sign_command, verify_command, CommandAuthError};
 pub use config::{AdaptiveConfig, AdaptivePriority, CentralConfig, RecordingConfig, RemoteConfig};
 pub use encryption::EncryptionConfig;
 pub use error::ConfigError;
