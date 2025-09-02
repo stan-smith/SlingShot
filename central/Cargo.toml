@@ -28,6 +28,9 @@ tokio = { version = "1", features = ["full"] }
 # Error handling
 anyhow = "1"
 
+# JSON for audit details
+serde_json = "1"
+
 # ONVIF server
 onvif-server = { path = "../onvif-server" }
 
@@ -57,6 +60,9 @@ recording-retrieval = { path = "../recording-retrieval" }
 
 # Fingerprint storage
 fingerprint-store = { path = "../fingerprint-store" }
+
+# Audit logging
+audit-log = { path = "../audit-log" }
 
 # Home directory
 dirs = "5"

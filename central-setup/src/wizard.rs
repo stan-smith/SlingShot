@@ -1,5 +1,5 @@
 use anyhow::Result;
-use config_manager::{generate_random_password, CentralConfig, OnvifAuthConfig};
+use config_manager::{generate_random_password, AuditConfig, CentralConfig, OnvifAuthConfig};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use fingerprint_store::FingerprintStore;
 use qrcode::QrCode;
@@ -155,6 +155,9 @@ fn finish_wizard(existing: Option<CentralConfig>, bind_interface: String) -> Res
         // Setup ONVIF credentials
         setup_onvif_credentials()?;
 
+        // Setup audit logging
+        setup_audit_logging()?;
+
         println!();
         println!("Restart the central node for changes to take effect.");
     } else {
@@ -278,6 +281,48 @@ fn setup_onvif_credentials() -> Result<()> {
     println!("  Password: {}", password);
     println!();
     println!("(Keep these credentials secure)");
+
+    Ok(())
+}
+
+/// Setup audit logging configuration
+fn setup_audit_logging() -> Result<()> {
+    println!();
+    println!("=== Audit Logging ===");
+    println!();
+
+    let existing = AuditConfig::load().ok();
+    let defaults = existing.unwrap_or_default();
+
+    let enabled = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("Enable audit logging?")
+        .default(defaults.enabled)
+        .interact()?;
+
+    let retention_days: u32 = if enabled {
+        Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Audit log retention (days)")
+            .default(defaults.retention_days)
+            .interact_text()?
+    } else {
+        defaults.retention_days
+    };
+
+    let config = AuditConfig {
+        enabled,
+        retention_days,
+    };
+    config.save()?;
+
+    if enabled {
+        println!();
+        println!("Audit logging enabled.");
+        println!("Events stored at: ~/.local/share/kaiju/audit.db");
+        println!("Retention period: {} days", retention_days);
+    } else {
+        println!();
+        println!("Audit logging disabled.");
+    }
 
     Ok(())
 }

@@ -1,6 +1,7 @@
 use admin_web::{broadcast, request_approval, run_admin_server, AdminCommand, AdminState};
 use anyhow::Result;
-use config_manager::{sign_command, CentralConfig, IdentityConfig, OnvifAuthConfig, TlsCertConfig};
+use audit_log::{AuditEvent, AuditLogger, EventType, Source};
+use config_manager::{sign_command, AuditConfig, CentralConfig, IdentityConfig, OnvifAuthConfig, TlsCertConfig};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use fingerprint_store::FingerprintStore;
 use gstreamer::prelude::*;
@@ -78,6 +79,29 @@ async fn async_main() -> Result<()> {
                     .expect("Failed to create in-memory store"),
             ))
         }
+    };
+
+    // Initialize audit logger (if enabled in config)
+    let audit_config = AuditConfig::load_or_default();
+    let audit_logger: Option<Arc<tokio::sync::Mutex<AuditLogger>>> = if audit_config.enabled {
+        match AuditLogger::open() {
+            Ok(logger) => {
+                if let Ok(path) = AuditLogger::default_path() {
+                    println!("Audit log: {}", path.display());
+                }
+                // Prune old events based on retention config
+                if let Err(e) = logger.prune_older_than(audit_config.retention_days) {
+                    eprintln!("Warning: Could not prune old audit events: {}", e);
+                }
+                Some(Arc::new(tokio::sync::Mutex::new(logger)))
+            }
+            Err(e) => {
+                eprintln!("Warning: Could not open audit log: {}", e);
+                None
+            }
+        }
+    } else {
+        None
     };
 
     println!("==========================================");
@@ -270,6 +294,7 @@ async fn async_main() -> Result<()> {
     let fingerprint_store_conn = Arc::clone(&fingerprint_store);
     let signing_key_conn = Arc::clone(&central_signing_key);
     let central_fp_conn = central_fingerprint.clone();
+    let audit_logger_conn = audit_logger.clone();
     let endpoint_clone = endpoint.clone();
     tokio::spawn(async move {
         loop {
@@ -281,9 +306,10 @@ async fn async_main() -> Result<()> {
                 let fp_store = Arc::clone(&fingerprint_store_conn);
                 let signing_key = Arc::clone(&signing_key_conn);
                 let central_fp = central_fp_conn.clone();
+                let audit = audit_logger_conn.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
-                        handle_connection(incoming, nodes, onvif_nodes, mounts, admin_state, fp_store, signing_key, central_fp, debug).await
+                        handle_connection(incoming, nodes, onvif_nodes, mounts, admin_state, fp_store, signing_key, central_fp, audit, debug).await
                     {
                         eprintln!("Connection error: {}", e);
                     }
@@ -423,12 +449,21 @@ async fn handle_connection(
     fingerprint_store: Arc<tokio::sync::Mutex<FingerprintStore>>,
     signing_key: Arc<SigningKey>,
     central_fingerprint: String,
+    audit_logger: Option<Arc<tokio::sync::Mutex<AuditLogger>>>,
     debug: bool,
 ) -> Result<()> {
     let connection = incoming.await?;
     let remote = connection.remote_address();
 
     println!("\n[New connection from {}]", remote);
+
+    // Log new connection
+    if let Some(logger) = &audit_logger {
+        let _ = logger.lock().await.log(
+            AuditEvent::new(EventType::NodeConnected, Source::Quic)
+                .with_source_addr(remote.to_string())
+        );
+    }
 
     // Receive authentication request: AUTH|name|fingerprint|VIDEO
     let mut recv_stream = connection.accept_uni().await?;
@@ -475,6 +510,17 @@ async fn handle_connection(
                 if let Err(e) = store.update_last_seen(&fingerprint) {
                     eprintln!("Warning: Could not update last_seen: {}", e);
                 }
+                // Log auto-approval
+                if let Some(logger) = &audit_logger {
+                    let _ = logger.lock().await.log(
+                        AuditEvent::new(EventType::NodeApproved, Source::Quic)
+                            .with_source_addr(remote.to_string())
+                            .with_node(&node_name)
+                            .with_fingerprint(&fingerprint)
+                            .with_details(serde_json::json!({"auto_approved": true}))
+                            .with_success(true)
+                    );
+                }
                 true
             }
             Ok(None) => {
@@ -498,6 +544,29 @@ async fn handle_connection(
                         println!(
                             "Stored fingerprint for '{}' in approved nodes database",
                             node_name
+                        );
+                    }
+                    // Log manual approval
+                    if let Some(logger) = &audit_logger {
+                        let _ = logger.lock().await.log(
+                            AuditEvent::new(EventType::NodeApproved, Source::AdminWeb)
+                                .with_source_addr(remote.to_string())
+                                .with_node(&node_name)
+                                .with_fingerprint(&fingerprint)
+                                .with_username("admin")
+                                .with_success(true)
+                        );
+                    }
+                } else {
+                    // Log rejection
+                    if let Some(logger) = &audit_logger {
+                        let _ = logger.lock().await.log(
+                            AuditEvent::new(EventType::NodeRejected, Source::AdminWeb)
+                                .with_source_addr(remote.to_string())
+                                .with_node(&node_name)
+                                .with_fingerprint(&fingerprint)
+                                .with_username("admin")
+                                .with_success(false)
                         );
                     }
                 }
@@ -750,6 +819,15 @@ async fn handle_connection(
 
                 // Send commands to remote (signed)
                 Some(cmd) = cmd_rx.recv() => {
+                    // Log command sent
+                    if let Some(logger) = &audit_logger {
+                        let _ = logger.lock().await.log(
+                            AuditEvent::new(EventType::CommandSent, Source::Quic)
+                                .with_node(&node_name)
+                                .with_fingerprint(&fingerprint)
+                                .with_details(serde_json::json!({"command": &cmd}))
+                        );
+                    }
                     let signed_cmd = sign_command(&signing_key, &cmd);
                     let mut send_stream = connection.open_uni().await?;
                     send_stream.write_all(signed_cmd.as_bytes()).await?;
@@ -790,6 +868,20 @@ async fn handle_connection(
                                                     header.filename,
                                                     format_size(header.file_size)
                                                 );
+                                                // Log file transfer started
+                                                if let Some(logger) = &audit_logger {
+                                                    let _ = logger.lock().await.log(
+                                                        AuditEvent::new(EventType::FileTransferStarted, Source::Quic)
+                                                            .with_node(&node_name)
+                                                            .with_fingerprint(&fingerprint)
+                                                            .with_details(serde_json::json!({
+                                                                "filename": header.filename,
+                                                                "file_size": header.file_size,
+                                                                "file_index": header.file_index,
+                                                                "total_files": header.total_files
+                                                            }))
+                                                    );
+                                                }
                                                 if let Err(e) = file_receiver.start_file(header).await {
                                                     eprintln!("[{}] Failed to start file: {}", node_name, e);
                                                 }
@@ -814,6 +906,18 @@ async fn handle_connection(
                                                     Ok(path) => {
                                                         println!("[{}] Saved: {}", node_name, path.display());
                                                         broadcast(&admin_state, &format!("[{}] Saved: {}", node_name, path.display())).await;
+                                                        // Log file transfer completed
+                                                        if let Some(logger) = &audit_logger {
+                                                            let _ = logger.lock().await.log(
+                                                                AuditEvent::new(EventType::FileTransferCompleted, Source::Quic)
+                                                                    .with_node(&node_name)
+                                                                    .with_fingerprint(&fingerprint)
+                                                                    .with_details(serde_json::json!({
+                                                                        "path": path.display().to_string()
+                                                                    }))
+                                                                    .with_success(true)
+                                                            );
+                                                        }
                                                     }
                                                     Err(e) => eprintln!("[{}] File complete error: {}", node_name, e),
                                                 }
@@ -843,6 +947,18 @@ async fn handle_connection(
                                             Ok(error) => {
                                                 eprintln!("[{}] Transfer error: {}", node_name, error.message);
                                                 broadcast(&admin_state, &format!("[{}] Transfer error: {}", node_name, error.message)).await;
+                                                // Log file transfer error
+                                                if let Some(logger) = &audit_logger {
+                                                    let _ = logger.lock().await.log(
+                                                        AuditEvent::new(EventType::FileTransferError, Source::Quic)
+                                                            .with_node(&node_name)
+                                                            .with_fingerprint(&fingerprint)
+                                                            .with_details(serde_json::json!({
+                                                                "error": error.message
+                                                            }))
+                                                            .with_success(false)
+                                                    );
+                                                }
                                             }
                                             Err(e) => eprintln!("[{}] TransferError decode error: {}", node_name, e),
                                         }
@@ -866,13 +982,27 @@ async fn handle_connection(
                                     let parts: Vec<&str> = msg.splitn(3, '|').collect();
                                     if parts.len() >= 3 {
                                         let status = parts[1];
-                                        let data = parts[2];
-                                        if status == "ok" {
-                                            println!("[{}] {}", node_name, data);
-                                            Some(format!("[{}] {}", node_name, data))
+                                        let result_data = parts[2];
+                                        let success = status == "ok";
+                                        // Log command result
+                                        if let Some(logger) = &audit_logger {
+                                            let _ = logger.lock().await.log(
+                                                AuditEvent::new(EventType::CommandResult, Source::Quic)
+                                                    .with_node(&node_name)
+                                                    .with_fingerprint(&fingerprint)
+                                                    .with_details(serde_json::json!({
+                                                        "status": status,
+                                                        "response": result_data
+                                                    }))
+                                                    .with_success(success)
+                                            );
+                                        }
+                                        if success {
+                                            println!("[{}] {}", node_name, result_data);
+                                            Some(format!("[{}] {}", node_name, result_data))
                                         } else {
-                                            println!("[{}] Error: {}", node_name, data);
-                                            Some(format!("[{}] Error: {}", node_name, data))
+                                            println!("[{}] Error: {}", node_name, result_data);
+                                            Some(format!("[{}] Error: {}", node_name, result_data))
                                         }
                                     } else {
                                         None
@@ -945,6 +1075,16 @@ async fn handle_connection(
             onvif.remove(&node_name);
         }
         println!("Node '{}' removed, relay stopped", node_name);
+
+        // Log node disconnected
+        if let Some(logger) = &audit_logger {
+            let _ = logger.lock().await.log(
+                AuditEvent::new(EventType::NodeDisconnected, Source::Quic)
+                    .with_source_addr(remote.to_string())
+                    .with_node(&node_name)
+                    .with_fingerprint(&fingerprint)
+            );
+        }
 
         // Notify admin clients
         broadcast(&admin_state, &format!("DISCONNECTED|{}", node_name)).await;

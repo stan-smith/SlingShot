@@ -18,4 +18,5 @@ members = [
     "kaiju-encryption",
     "adaptive-bitrate",
     "ws-security",
+    "audit-log",
 ]
