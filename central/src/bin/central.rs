@@ -15,7 +15,6 @@ use recording_retrieval::{
 };
 use std::collections::HashMap;
 use std::env;
-use std::io::{self, BufRead, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,7 +47,6 @@ async fn async_main() -> Result<()> {
 
     // Parse CLI arguments
     let args: Vec<String> = env::args().collect();
-    let headless = args.iter().any(|a| a == "--headless");
     let debug = args.iter().any(|a| a == "--debug");
 
     // Load configuration (require config file to exist)
@@ -183,14 +181,9 @@ async fn async_main() -> Result<()> {
     if let Some(addr) = config.admin_addrs().into_iter().next() {
         println!("Admin web interface at http://{}", addr);
     }
-    if headless {
-        println!("Running in headless mode (no stdin)");
-    }
     if debug {
         println!("Debug mode enabled (verbose metrics)");
     }
-    println!();
-    print_help();
     println!();
 
     // Shared state for connected nodes
@@ -264,28 +257,6 @@ async fn async_main() -> Result<()> {
         }
     });
 
-    // Channel for user input commands
-    let (input_tx, mut input_rx) = mpsc::channel::<String>(100);
-
-    // Spawn input reader thread (only if not headless)
-    if !headless {
-        std::thread::spawn(move || {
-            let stdin = io::stdin();
-            let mut stdout = io::stdout();
-
-            loop {
-                print!("> ");
-                stdout.flush().unwrap();
-
-                let mut line = String::new();
-                if stdin.lock().read_line(&mut line).unwrap() == 0 {
-                    break;
-                }
-                let _ = input_tx.blocking_send(line.trim().to_string());
-            }
-        });
-    }
-
     // Spawn connection acceptor
     let nodes_clone = Arc::clone(&nodes);
     let onvif_nodes_clone = Arc::clone(&onvif_nodes);
@@ -318,7 +289,18 @@ async fn async_main() -> Result<()> {
         }
     });
 
-    // Main command loop - handle both stdin and admin web commands
+    // Setup signal handlers for graceful shutdown
+    let mut sigint = tokio::signal::unix::signal(
+        tokio::signal::unix::SignalKind::interrupt()
+    )?;
+    let mut sigterm = tokio::signal::unix::signal(
+        tokio::signal::unix::SignalKind::terminate()
+    )?;
+
+    println!("Service running. Control via web UI. Press Ctrl+C to stop.");
+    println!();
+
+    // Main command loop - handle admin web commands and signals
     loop {
         tokio::select! {
             // Handle admin web commands
@@ -330,59 +312,18 @@ async fn async_main() -> Result<()> {
                 }
             }
 
-            // Handle stdin commands (only active if not headless)
-            Some(line) = input_rx.recv() => {
-                if line.is_empty() {
-                    continue;
-                }
+            // Handle graceful shutdown on SIGINT (Ctrl+C)
+            _ = sigint.recv() => {
+                println!("\nReceived SIGINT, shutting down...");
+                main_loop.quit();
+                break;
+            }
 
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.is_empty() {
-                    continue;
-                }
-
-                match parts[0].to_lowercase().as_str() {
-                    "nodes" | "list" => {
-                        let nodes = nodes.lock().await;
-                        if nodes.is_empty() {
-                            println!("No remote nodes connected");
-                        } else {
-                            println!("Connected nodes:");
-                            for (name, node) in nodes.iter() {
-                                println!("  {} - {} ({})", name, node.address, &node.fingerprint[..16]);
-                                println!("    Video: QUIC stream");
-                                println!("    Local RTSP: rtsp://127.0.0.1:8554/{}/stream", name);
-                            }
-                        }
-                    }
-                    "help" | "h" | "?" => {
-                        print_help();
-                    }
-                    "quit" | "exit" | "q" => {
-                        println!("Shutting down...");
-                        main_loop.quit();
-                        break;
-                    }
-                    node_name => {
-                        // Commands directed at a specific node
-                        if parts.len() < 2 {
-                            println!("Usage: <node> <command> [args...]");
-                            continue;
-                        }
-
-                        let nodes = nodes.lock().await;
-                        if let Some(node) = nodes.get(node_name) {
-                            let cmd = parts[1..].join(" ");
-                            // Send raw command - will be signed in handle_connection
-                            if let Err(e) = node.cmd_tx.send(cmd).await {
-                                eprintln!("Failed to send command: {}", e);
-                            }
-                        } else {
-                            println!("Unknown node: {}", node_name);
-                            println!("Use 'nodes' to list connected nodes");
-                        }
-                    }
-                }
+            // Handle graceful shutdown on SIGTERM
+            _ = sigterm.recv() => {
+                println!("\nReceived SIGTERM, shutting down...");
+                main_loop.quit();
+                break;
             }
         }
     }
@@ -1022,9 +963,6 @@ async fn handle_connection(
                                 if let Some(msg) = broadcast_msg {
                                     broadcast(&admin_state, &msg).await;
                                 }
-
-                                print!("> ");
-                                io::stdout().flush().unwrap();
                             } else {
                                 // Video frame (binary)
                                 let frame = match quic_video::VideoFrame::decode(&data) {
@@ -1098,8 +1036,10 @@ async fn handle_connection(
     Ok(())
 }
 
+/// Reference documentation for available commands (via web UI)
+#[allow(dead_code)]
 fn print_help() {
-    println!("Commands:");
+    println!("Web UI Commands:");
     println!("  nodes                        - List connected nodes with RTSP URLs");
     println!();
     println!("Stream Control:");
@@ -1131,14 +1071,10 @@ fn print_help() {
     println!("  <node> recordings <ISO8601> <ISO8601>  - Specific time range");
     println!("  Files saved to: ~/Videos/kaiju/<node>/");
     println!();
-    println!("  help                         - Show this help");
-    println!("  quit                         - Exit");
-    println!();
     println!("Relayed streams: rtsp://<host>:<port>/<node>/stream");
     println!("ONVIF PTZ:       http://<host>:<port>/onvif/<node>/ptz_service");
     println!();
     println!("Options:");
-    println!("  --headless                   - Run without stdin (admin via web only)");
     println!("  --debug                      - Show verbose metrics (QUIC stats, QoS, frame counts)");
     println!();
     println!("Configuration: Run 'kaiju-central-setup' to configure network bindings and ports.");
