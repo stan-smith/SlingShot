@@ -29,6 +29,10 @@ const HEARTBEAT_INTERVAL_SECS: u64 = 10;
 const HEARTBEAT_TIMEOUT_SECS: u64 = 15;
 /// Reconnect attempt interval in seconds
 const RECONNECT_INTERVAL_SECS: u64 = 10;
+/// Connection timeout in seconds
+const CONNECTION_TIMEOUT_SECS: u64 = 30;
+/// Encryption check interval in seconds (runs independently of connection)
+const ENCRYPTION_INTERVAL_SECS: u64 = 5;
 
 /// Remote Node - Video Streamer with ONVIF Camera Control
 ///
@@ -591,25 +595,52 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
     };
 
     // Create segment encryptor if encryption is enabled and we have a key
-    let mut segment_encryptor: Option<SegmentEncryptor> = if let Some(ref rec_config) = recording_config {
-        if let Some(ref pubkey) = rec_config.encryption_pubkey {
-            let mut enc = SegmentEncryptor::new(
-                rec_config.output_dir.clone(),
-                rec_config.file_format.clone(),
-                pubkey.clone(),
-            );
-            // Scan existing files so we don't re-encrypt them
-            if let Err(e) = enc.scan_existing() {
-                eprintln!("Warning: Could not scan existing recordings: {}", e);
+    // Wrapped in Arc<Mutex<>> so encryption can run independently of connection state
+    let segment_encryptor: Arc<Mutex<Option<SegmentEncryptor>>> = Arc::new(Mutex::new(
+        if let Some(ref rec_config) = recording_config {
+            if let Some(ref pubkey) = rec_config.encryption_pubkey {
+                let mut enc = SegmentEncryptor::new(
+                    rec_config.output_dir.clone(),
+                    rec_config.file_format.clone(),
+                    pubkey.clone(),
+                );
+                // Scan existing files so we don't re-encrypt them
+                if let Err(e) = enc.scan_existing() {
+                    eprintln!("Warning: Could not scan existing recordings: {}", e);
+                }
+                println!("Recording encryption enabled");
+                Some(enc)
+            } else {
+                println!("Encryption enabled but no key yet (will get on approval)");
+                None
             }
-            println!("Recording encryption enabled");
-            Some(enc)
         } else {
             None
         }
-    } else {
-        None
-    };
+    ));
+
+    // Spawn background encryption task - runs independently of connection state
+    // This ensures recordings are encrypted even when disconnected/reconnecting
+    let encryption_task_encryptor = segment_encryptor.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(ENCRYPTION_INTERVAL_SECS));
+        loop {
+            interval.tick().await;
+            let mut enc_guard = encryption_task_encryptor.lock().unwrap();
+            if let Some(ref mut enc) = *enc_guard {
+                match enc.process_completed() {
+                    Ok(count) if count > 0 => {
+                        // Encrypted segments logged by encryptor
+                    }
+                    Err(e) => {
+                        eprintln!("Encryption error: {}", e);
+                    }
+                    _ => {}
+                }
+            }
+            drop(enc_guard);
+        }
+    });
     println!();
 
     // Save config if this is first run
@@ -808,21 +839,33 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
         };
 
         let connection = match endpoint.connect_with(client_config, remote_addr, "localhost") {
-            Ok(connecting) => match connecting.await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    let err_str = e.to_string();
-                    if err_str.contains("certificate") || err_str.contains("BadEncoding") {
-                        eprintln!("CERTIFICATE MISMATCH - possible MITM attack!");
-                        eprintln!("The server's certificate does not match the pinned certificate.");
-                        eprintln!("If the server certificate was legitimately changed:");
-                        eprintln!("  Delete ~/.config/kaiju/pinned-cert.toml to re-establish trust");
-                        // Don't retry automatically for security - exit
-                        std::process::exit(1);
+            Ok(connecting) => {
+                // Add timeout to prevent indefinite blocking if central is unreachable
+                match tokio::time::timeout(
+                    Duration::from_secs(CONNECTION_TIMEOUT_SECS),
+                    connecting
+                ).await {
+                    Ok(Ok(conn)) => conn,
+                    Ok(Err(e)) => {
+                        let err_str = e.to_string();
+                        if err_str.contains("certificate") || err_str.contains("BadEncoding") {
+                            eprintln!("CERTIFICATE MISMATCH - possible MITM attack!");
+                            eprintln!("The server's certificate does not match the pinned certificate.");
+                            eprintln!("If the server certificate was legitimately changed:");
+                            eprintln!("  Delete ~/.config/kaiju/pinned-cert.toml to re-establish trust");
+                            // Don't retry automatically for security - exit
+                            std::process::exit(1);
+                        }
+                        eprintln!("Connection failed: {}. Retrying in {}s...", e, RECONNECT_INTERVAL_SECS);
+                        tokio::time::sleep(Duration::from_secs(RECONNECT_INTERVAL_SECS)).await;
+                        continue 'reconnect;
                     }
-                    eprintln!("Connection failed: {}. Retrying in {}s...", e, RECONNECT_INTERVAL_SECS);
-                    tokio::time::sleep(Duration::from_secs(RECONNECT_INTERVAL_SECS)).await;
-                    continue 'reconnect;
+                    Err(_) => {
+                        eprintln!("Connection timeout ({}s). Central may be unreachable. Retrying in {}s...",
+                            CONNECTION_TIMEOUT_SECS, RECONNECT_INTERVAL_SECS);
+                        tokio::time::sleep(Duration::from_secs(RECONNECT_INTERVAL_SECS)).await;
+                        continue 'reconnect;
+                    }
                 }
             },
             Err(e) => {
@@ -929,8 +972,10 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                                     rec_config.file_format.clone(),
                                     pubkey_hex.to_string(),
                                 );
-                                let was_new = segment_encryptor.is_none();
-                                segment_encryptor = Some(enc);
+                                let mut enc_guard = segment_encryptor.lock().unwrap();
+                                let was_new = enc_guard.is_none();
+                                *enc_guard = Some(enc);
+                                drop(enc_guard);
                                 if was_new {
                                     println!("Recording encryption enabled with new key");
                                 } else {
@@ -1355,18 +1400,7 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                             if let Err(e) = rec.check_and_restart() {
                                 eprintln!("Recorder error: {}", e);
                             }
-                            // Encrypt completed segments if encryption is enabled
-                            if let Some(ref mut enc) = segment_encryptor {
-                                match enc.process_completed() {
-                                    Ok(count) if count > 0 => {
-                                        // Encrypted segments logged by encryptor
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Encryption error: {}", e);
-                                    }
-                                    _ => {}
-                                }
-                            }
+                            // Note: Encryption is handled by background task (runs independently of connection)
                             // Ensure disk space by deleting old recordings if needed
                             if let Err(e) = ensure_disk_space(
                                 &rec.config().output_dir,
@@ -1438,12 +1472,15 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
     }
 
     // Encrypt any remaining segments on shutdown
-    if let Some(ref mut enc) = segment_encryptor {
-        println!("Finalizing segment encryption...");
-        match enc.finalize() {
-            Ok(count) if count > 0 => println!("Encrypted {} remaining segment(s)", count),
-            Err(e) => eprintln!("Failed to finalize encryption: {}", e),
-            _ => {}
+    {
+        let mut enc_guard = segment_encryptor.lock().unwrap();
+        if let Some(ref mut enc) = *enc_guard {
+            println!("Finalizing segment encryption...");
+            match enc.finalize() {
+                Ok(count) if count > 0 => println!("Encrypted {} remaining segment(s)", count),
+                Err(e) => eprintln!("Failed to finalize encryption: {}", e),
+                _ => {}
+            }
         }
     }
 

@@ -29,3 +29,6 @@ if-addrs = "0.13"
 
 # QR code display in terminal
 qrcode = "0.14"
+
+# User/group info (for systemd service installation)
+users = "0.11"
