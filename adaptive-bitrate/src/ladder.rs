@@ -91,19 +91,19 @@ impl QualityLadder {
 
     /// Generate ladder with resolution priority
     ///
-    /// For each resolution tier, cycle through all framerates before
-    /// moving to the next resolution.
+    /// Sorted by bitrate descending. At equal bitrates, prefers higher resolution
+    /// (keeps resolution, drops framerate first).
     fn generate_resolution_priority(
         config: &AdaptiveConfig,
         floors: &BitrateFloors,
     ) -> Vec<QualityStep> {
-        let mut steps = Vec::new();
-
-        // Filter resolutions between target and minimum
         let target_pixels = config.target_width as i64 * config.target_height as i64;
         let min_pixels = config.min_width as i64 * config.min_height as i64;
 
-        for &(width, height) in RESOLUTIONS {
+        // Collect all valid combinations with resolution tier for tiebreaker
+        let mut scored_steps: Vec<(usize, QualityStep)> = Vec::new();
+
+        for (res_tier, &(width, height)) in RESOLUTIONS.iter().enumerate() {
             let pixels = width as i64 * height as i64;
             if pixels > target_pixels || pixels < min_pixels {
                 continue;
@@ -115,27 +115,37 @@ impl QualityLadder {
                 }
 
                 let min_bitrate = floors.get(width, height, fps);
-                steps.push(QualityStep::new(width, height, fps, min_bitrate));
+                scored_steps.push((res_tier, QualityStep::new(width, height, fps, min_bitrate)));
             }
         }
 
-        steps
+        // Sort by bitrate descending (primary), then by resolution tier ascending (tiebreaker)
+        // Lower res_tier = higher resolution = preferred at equal bitrate
+        scored_steps.sort_by(|a, b| {
+            match b.1.min_bitrate.cmp(&a.1.min_bitrate) {
+                std::cmp::Ordering::Equal => a.0.cmp(&b.0), // Lower tier (higher res) wins
+                other => other,
+            }
+        });
+
+        scored_steps.into_iter().map(|(_, step)| step).collect()
     }
 
     /// Generate ladder with framerate priority
     ///
-    /// For each framerate tier, cycle through all resolutions before
-    /// moving to the next framerate.
+    /// Sorted by bitrate descending. At equal bitrates, prefers higher framerate
+    /// (keeps framerate, drops resolution first).
     fn generate_framerate_priority(
         config: &AdaptiveConfig,
         floors: &BitrateFloors,
     ) -> Vec<QualityStep> {
-        let mut steps = Vec::new();
-
         let target_pixels = config.target_width as i64 * config.target_height as i64;
         let min_pixels = config.min_width as i64 * config.min_height as i64;
 
-        for &fps in FRAMERATES {
+        // Collect all valid combinations with framerate tier for tiebreaker
+        let mut scored_steps: Vec<(usize, QualityStep)> = Vec::new();
+
+        for (fps_tier, &fps) in FRAMERATES.iter().enumerate() {
             if fps > config.target_framerate {
                 continue;
             }
@@ -147,16 +157,27 @@ impl QualityLadder {
                 }
 
                 let min_bitrate = floors.get(width, height, fps);
-                steps.push(QualityStep::new(width, height, fps, min_bitrate));
+                scored_steps.push((fps_tier, QualityStep::new(width, height, fps, min_bitrate)));
             }
         }
 
-        steps
+        // Sort by bitrate descending (primary), then by framerate tier ascending (tiebreaker)
+        // Lower fps_tier = higher framerate = preferred at equal bitrate
+        scored_steps.sort_by(|a, b| {
+            match b.1.min_bitrate.cmp(&a.1.min_bitrate) {
+                std::cmp::Ordering::Equal => a.0.cmp(&b.0), // Lower tier (higher fps) wins
+                other => other,
+            }
+        });
+
+        scored_steps.into_iter().map(|(_, step)| step).collect()
     }
 
     /// Generate balanced ladder
     ///
-    /// Uses a scoring system to interleave resolution and framerate drops.
+    /// Sorted by bitrate floor descending to ensure stepping down always reduces
+    /// bandwidth. Quality score (resolution weighted 2x vs framerate) is used as
+    /// a tiebreaker when bitrates are equal.
     fn generate_balanced(
         config: &AdaptiveConfig,
         floors: &BitrateFloors,
@@ -164,7 +185,7 @@ impl QualityLadder {
         let target_pixels = config.target_width as i64 * config.target_height as i64;
         let min_pixels = config.min_width as i64 * config.min_height as i64;
 
-        // Collect all valid combinations with scores
+        // Collect all valid combinations with quality scores
         let mut scored_steps: Vec<(i32, QualityStep)> = Vec::new();
 
         for (res_tier, &(width, height)) in RESOLUTIONS.iter().enumerate() {
@@ -178,7 +199,7 @@ impl QualityLadder {
                     continue;
                 }
 
-                // Score: higher is better quality
+                // Quality score: higher is better (used as tiebreaker)
                 // Resolution weighted 2x compared to framerate
                 let score = (RESOLUTIONS.len() - res_tier) as i32 * 2
                     + (FRAMERATES.len() - fps_tier) as i32;
@@ -188,8 +209,14 @@ impl QualityLadder {
             }
         }
 
-        // Sort by score descending (highest quality first)
-        scored_steps.sort_by(|a, b| b.0.cmp(&a.0));
+        // Sort by bitrate descending (primary), then by quality score descending (tiebreaker)
+        // This ensures stepping down ALWAYS reduces bitrate
+        scored_steps.sort_by(|a, b| {
+            match b.1.min_bitrate.cmp(&a.1.min_bitrate) {
+                std::cmp::Ordering::Equal => b.0.cmp(&a.0), // Higher quality score wins ties
+                other => other,
+            }
+        });
 
         scored_steps.into_iter().map(|(_, step)| step).collect()
     }
@@ -301,11 +328,12 @@ mod tests {
         ladder.step_down();
         let after = ladder.current();
 
-        // After stepping down, quality should be lower
-        // (either lower resolution or lower framerate)
+        // After stepping down, bitrate should be lower or equal
         assert!(
-            after.pixels() < before.pixels()
-                || after.framerate < before.framerate
+            after.min_bitrate <= before.min_bitrate,
+            "Step down should not increase bitrate: {} -> {}",
+            before.min_bitrate,
+            after.min_bitrate
         );
 
         // Should be able to step back up
@@ -315,62 +343,75 @@ mod tests {
     }
 
     #[test]
-    fn test_resolution_priority_order() {
+    fn test_bitrate_monotonically_decreasing() {
+        // Test all priority modes ensure bitrate never increases when stepping down
+        for priority in [
+            AdaptivePriority::Balanced,
+            AdaptivePriority::Resolution,
+            AdaptivePriority::Framerate,
+        ] {
+            let mut config = test_config();
+            config.priority = priority;
+
+            let floors = BitrateFloors::load_embedded();
+            let ladder = QualityLadder::new(&config, &floors).expect("ladder should be created");
+
+            let steps = ladder.steps();
+            for i in 1..steps.len() {
+                assert!(
+                    steps[i].min_bitrate <= steps[i - 1].min_bitrate,
+                    "{:?}: Step {} ({:?}) has higher bitrate ({}) than step {} ({:?}, {})",
+                    priority,
+                    i,
+                    steps[i],
+                    steps[i].min_bitrate,
+                    i - 1,
+                    steps[i - 1],
+                    steps[i - 1].min_bitrate
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolution_priority_tiebreaker() {
         let mut config = test_config();
         config.priority = AdaptivePriority::Resolution;
 
         let floors = BitrateFloors::load_embedded();
         let ladder = QualityLadder::new(&config, &floors).expect("ladder should be created");
 
-        // In resolution priority, we should see all framerates for
-        // 1280x720 before seeing 1024x576
+        // At equal bitrates, higher resolution should come first
         let steps = ladder.steps();
-        let mut seen_720p = false;
-        let mut seen_576p_after_720p = false;
-
-        for step in steps {
-            if step.width == 1280 && step.height == 720 {
-                seen_720p = true;
-            }
-            if step.width == 1024 && step.height == 576 {
-                if seen_720p {
-                    seen_576p_after_720p = true;
-                }
+        for i in 1..steps.len() {
+            if steps[i].min_bitrate == steps[i - 1].min_bitrate {
+                // Equal bitrate - higher resolution should be earlier
+                assert!(
+                    steps[i].pixels() <= steps[i - 1].pixels(),
+                    "At equal bitrate, higher resolution should come first"
+                );
             }
         }
-
-        assert!(seen_576p_after_720p);
     }
 
     #[test]
-    fn test_framerate_priority_order() {
+    fn test_framerate_priority_tiebreaker() {
         let mut config = test_config();
         config.priority = AdaptivePriority::Framerate;
 
         let floors = BitrateFloors::load_embedded();
         let ladder = QualityLadder::new(&config, &floors).expect("ladder should be created");
 
-        // In framerate priority, we should see all resolutions at 30fps
-        // before seeing any at 15fps
+        // At equal bitrates, higher framerate should come first
         let steps = ladder.steps();
-
-        // Find index of first 15fps step
-        let first_15fps_idx = steps.iter().position(|s| s.framerate == 15);
-        // Find index of last 30fps step
-        let last_30fps_idx = steps.iter().rposition(|s| s.framerate == 30);
-
-        // All 30fps should come before any 15fps
-        if let (Some(last_30), Some(first_15)) = (last_30fps_idx, first_15fps_idx) {
-            assert!(
-                last_30 < first_15,
-                "Expected all 30fps before 15fps, but last 30fps at {} and first 15fps at {}",
-                last_30,
-                first_15
-            );
+        for i in 1..steps.len() {
+            if steps[i].min_bitrate == steps[i - 1].min_bitrate {
+                // Equal bitrate - higher framerate should be earlier
+                assert!(
+                    steps[i].framerate <= steps[i - 1].framerate,
+                    "At equal bitrate, higher framerate should come first"
+                );
+            }
         }
-
-        // There should be steps at both framerates
-        assert!(steps.iter().any(|s| s.framerate == 30));
-        assert!(steps.iter().any(|s| s.framerate == 15));
     }
 }
