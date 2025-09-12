@@ -742,6 +742,13 @@ async fn handle_connection(
             FileTransferReceiver::new(output_dir.clone())
         };
 
+        // Clean up any orphaned files from previous sessions
+        if let Ok(cleaned) = file_receiver.cleanup_orphans().await {
+            if cleaned > 0 {
+                println!("[{}] Cleaned up {} orphaned file(s)", node_name, cleaned);
+            }
+        }
+
         // Main loop: handle video frames, commands, and stats
         let mut stats_interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
@@ -847,6 +854,11 @@ async fn handle_connection(
                                                     Ok(path) => {
                                                         println!("[{}] Saved: {}", node_name, path.display());
                                                         broadcast(&admin_state, &format!("[{}] Saved: {}", node_name, path.display())).await;
+                                                        // Send success ACK to remote
+                                                        let ack = format!("FILE_ACK|{}|{}|ok", complete.request_id, complete.file_index);
+                                                        if let Err(e) = cmd_tx.send(ack).await {
+                                                            eprintln!("[{}] Failed to send FILE_ACK: {}", node_name, e);
+                                                        }
                                                         // Log file transfer completed
                                                         if let Some(logger) = &audit_logger {
                                                             let _ = logger.lock().await.log(
@@ -860,7 +872,12 @@ async fn handle_connection(
                                                             );
                                                         }
                                                     }
-                                                    Err(e) => eprintln!("[{}] File complete error: {}", node_name, e),
+                                                    Err(e) => {
+                                                        eprintln!("[{}] File complete error: {}", node_name, e);
+                                                        // Send failure NAK to remote
+                                                        let nak = format!("FILE_ACK|{}|{}|error|{}", complete.request_id, complete.file_index, e);
+                                                        let _ = cmd_tx.send(nak).await;
+                                                    }
                                                 }
                                             }
                                             Err(e) => eprintln!("[{}] FileComplete decode error: {}", node_name, e),

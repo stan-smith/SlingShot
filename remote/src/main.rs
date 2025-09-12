@@ -1153,6 +1153,30 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                                     continue;
                                 }
 
+                                // Handle file transfer ACK/NAK from central
+                                if msg.starts_with("FILE_ACK|") {
+                                    // FILE_ACK|request_id|file_index|ok
+                                    // FILE_ACK|request_id|file_index|error|message
+                                    let parts: Vec<&str> = msg.split('|').collect();
+                                    if let (Some(req_id), Some(file_idx), Some(status)) =
+                                        (parts.get(1), parts.get(2), parts.get(3))
+                                    {
+                                        if *status == "ok" {
+                                            println!(
+                                                "[TRANSFER] File {} (request {}) confirmed by central",
+                                                file_idx, req_id
+                                            );
+                                        } else {
+                                            let error = parts.get(4).unwrap_or(&"unknown");
+                                            eprintln!(
+                                                "[TRANSFER] File {} (request {}) FAILED at central: {}",
+                                                file_idx, req_id, error
+                                            );
+                                        }
+                                    }
+                                    continue;
+                                }
+
                                 if msg.starts_with("CMD|") {
                                     // Verify command signature
                                     let cmd = if let Some(ref vk) = central_verifying_key {

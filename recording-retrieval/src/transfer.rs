@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use crc32fast::Hasher;
 use tokio::fs::File;
@@ -328,7 +329,9 @@ impl FileTransferReceiver {
         // Ensure output directory exists
         tokio::fs::create_dir_all(&self.output_dir).await?;
 
-        let output_path = self.output_dir.join(&safe_filename);
+        // Write to temp file during transfer, rename on successful CRC
+        let temp_filename = format!("{}.tmpss", safe_filename);
+        let output_path = self.output_dir.join(&temp_filename);
         let file = File::create(&output_path).await?;
 
         let key = (header.request_id, header.file_index);
@@ -399,8 +402,28 @@ impl FileTransferReceiver {
         // Verify file CRC
         let actual_crc = Self::calculate_file_crc(&transfer.output_path).await?;
         if actual_crc != transfer.header.crc32 {
-            // Delete corrupted file
-            let _ = tokio::fs::remove_file(&transfer.output_path).await;
+            // Delete corrupted file with retry
+            for attempt in 1..=3 {
+                match tokio::fs::remove_file(&transfer.output_path).await {
+                    Ok(()) => break,
+                    Err(e) if attempt < 3 => {
+                        eprintln!(
+                            "Warning: Failed to remove corrupted file '{}' (attempt {}): {}",
+                            transfer.output_path.display(),
+                            attempt,
+                            e
+                        );
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "ERROR: Could not remove corrupted file '{}' after 3 attempts: {}",
+                            transfer.output_path.display(),
+                            e
+                        );
+                    }
+                }
+            }
             return Err(RetrievalError::FileCorrupted {
                 filename: transfer.header.filename,
                 expected: transfer.header.crc32,
@@ -408,12 +431,16 @@ impl FileTransferReceiver {
             });
         }
 
+        // CRC verified - rename from .tmpss to final filename
+        let final_path = self.output_dir.join(&transfer.header.filename);
+        tokio::fs::rename(&transfer.output_path, &final_path).await?;
+
         // If file is encrypted, decrypt it
         if transfer.header.encrypted {
-            return self.decrypt_file(&transfer.output_path).await;
+            return self.decrypt_file(&final_path).await;
         }
 
-        Ok(transfer.output_path)
+        Ok(final_path)
     }
 
     /// Decrypt an encrypted file and return the path to the decrypted file
@@ -488,6 +515,45 @@ impl FileTransferReceiver {
     /// Get output directory
     pub fn output_dir(&self) -> &Path {
         &self.output_dir
+    }
+
+    /// Clean up incomplete transfers from previous sessions
+    ///
+    /// Scans output directory and removes .tmpss files (SlingShot temp files
+    /// from interrupted transfers). Returns the number of files cleaned up.
+    pub async fn cleanup_orphans(&self) -> Result<u32, RetrievalError> {
+        let mut cleaned = 0;
+
+        // Ensure directory exists before scanning
+        if !self.output_dir.exists() {
+            return Ok(0);
+        }
+
+        let mut entries = match tokio::fs::read_dir(&self.output_dir).await {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("Warning: Could not scan for orphans: {}", e);
+                return Ok(0);
+            }
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+
+            // Remove .tmpss files (SlingShot temp files from interrupted transfers)
+            if name.ends_with(".tmpss") {
+                if tokio::fs::remove_file(&path).await.is_ok() {
+                    println!("[CLEANUP] Removed orphan: {}", name);
+                    cleaned += 1;
+                }
+            }
+        }
+
+        Ok(cleaned)
     }
 }
 
