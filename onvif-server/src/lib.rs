@@ -5,6 +5,8 @@
 //!
 //! All endpoints require WS-Security UsernameToken authentication.
 
+mod templates;
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -72,40 +74,16 @@ fn check_auth(body: &str, state: &OnvifServerState) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Generate SOAP authentication fault response
-fn soap_auth_fault(reason: &str) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
-  <s:Body>
-    <s:Fault>
-      <s:Code>
-        <s:Value>s:Sender</s:Value>
-        <s:Subcode>
-          <s:Value>wsse:FailedAuthentication</s:Value>
-        </s:Subcode>
-      </s:Code>
-      <s:Reason>
-        <s:Text xml:lang="en">{}</s:Text>
-      </s:Reason>
-    </s:Fault>
-  </s:Body>
-</s:Envelope>"#,
-        reason
-    )
-}
-
 /// Handle discovery requests (list all nodes)
 async fn handle_discovery(
     State(state): State<Arc<OnvifServerState>>,
     body: String,
 ) -> impl IntoResponse {
-    // Check authentication
     if let Err(reason) = check_auth(&body, &state) {
         return (
             StatusCode::UNAUTHORIZED,
             [("Content-Type", "application/soap+xml")],
-            soap_auth_fault(&reason),
+            templates::auth_fault(&reason),
         );
     }
 
@@ -116,33 +94,12 @@ async fn handle_discovery(
         "GetServices" => {
             let nodes = state.nodes.lock().await;
             let mut services = String::new();
-
             for name in nodes.keys() {
-                services.push_str(&format!(
-                    r#"
-      <tds:Service>
-        <tds:Namespace>http://www.onvif.org/ver20/ptz/wsdl</tds:Namespace>
-        <tds:XAddr>http://{}:8080/onvif/{}/ptz_service</tds:XAddr>
-        <tds:Version><tt:Major>2</tt:Major><tt:Minor>0</tt:Minor></tds:Version>
-      </tds:Service>"#,
-                    state.local_ip, name
-                ));
+                services.push_str(&templates::service_entry(&state.local_ip, name));
             }
-
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
-            xmlns:tds="http://www.onvif.org/ver10/device/wsdl"
-            xmlns:tt="http://www.onvif.org/ver10/schema">
-  <s:Body>
-    <tds:GetServicesResponse>{}</tds:GetServicesResponse>
-  </s:Body>
-</s:Envelope>"#,
-                services
-            )
+            templates::get_services_response(&services)
         }
-
-        _ => soap_fault("ActionNotSupported", &format!("Unknown action: {}", action)),
+        _ => templates::fault("ActionNotSupported", &format!("Unknown action: {}", action)),
     };
 
     (
@@ -158,73 +115,31 @@ async fn handle_device_service(
     State(state): State<Arc<OnvifServerState>>,
     body: String,
 ) -> impl IntoResponse {
-    // Check authentication
     if let Err(reason) = check_auth(&body, &state) {
         return (
             StatusCode::UNAUTHORIZED,
             [("Content-Type", "application/soap+xml")],
-            soap_auth_fault(&reason),
+            templates::auth_fault(&reason),
         );
     }
 
     let action = extract_soap_action(&body);
     println!("[ONVIF] Device service for '{}': {}", node, action);
 
-    // Check if node exists
     let nodes = state.nodes.lock().await;
     if !nodes.contains_key(&node) {
         return (
             StatusCode::NOT_FOUND,
             [("Content-Type", "application/soap+xml")],
-            soap_fault("ter:InvalidArgVal", &format!("Node '{}' not found", node)),
+            templates::fault("ter:InvalidArgVal", &format!("Node '{}' not found", node)),
         );
     }
     drop(nodes);
 
     let response = match action.as_str() {
-        "GetDeviceInformation" => {
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
-            xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
-  <s:Body>
-    <tds:GetDeviceInformationResponse>
-      <tds:Manufacturer>RTSP-Proxy</tds:Manufacturer>
-      <tds:Model>Virtual-{}</tds:Model>
-      <tds:FirmwareVersion>1.0.0</tds:FirmwareVersion>
-      <tds:SerialNumber>{}</tds:SerialNumber>
-      <tds:HardwareId>Central-Proxy</tds:HardwareId>
-    </tds:GetDeviceInformationResponse>
-  </s:Body>
-</s:Envelope>"#,
-                node, node
-            )
-        }
-
-        "GetCapabilities" => {
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
-            xmlns:tds="http://www.onvif.org/ver10/device/wsdl"
-            xmlns:tt="http://www.onvif.org/ver10/schema">
-  <s:Body>
-    <tds:GetCapabilitiesResponse>
-      <tds:Capabilities>
-        <tt:Media>
-          <tt:XAddr>http://{}:8080/onvif/{}/media_service</tt:XAddr>
-        </tt:Media>
-        <tt:PTZ>
-          <tt:XAddr>http://{}:8080/onvif/{}/ptz_service</tt:XAddr>
-        </tt:PTZ>
-      </tds:Capabilities>
-    </tds:GetCapabilitiesResponse>
-  </s:Body>
-</s:Envelope>"#,
-                state.local_ip, node, state.local_ip, node
-            )
-        }
-
-        _ => soap_fault("ActionNotSupported", &format!("Unknown action: {}", action)),
+        "GetDeviceInformation" => templates::get_device_information(&node),
+        "GetCapabilities" => templates::get_capabilities(&state.local_ip, &node),
+        _ => templates::fault("ActionNotSupported", &format!("Unknown action: {}", action)),
     };
 
     (
@@ -240,79 +155,31 @@ async fn handle_media_service(
     State(state): State<Arc<OnvifServerState>>,
     body: String,
 ) -> impl IntoResponse {
-    // Check authentication
     if let Err(reason) = check_auth(&body, &state) {
         return (
             StatusCode::UNAUTHORIZED,
             [("Content-Type", "application/soap+xml")],
-            soap_auth_fault(&reason),
+            templates::auth_fault(&reason),
         );
     }
 
     let action = extract_soap_action(&body);
     println!("[ONVIF] Media service for '{}': {}", node, action);
 
-    // Check if node exists
     let nodes = state.nodes.lock().await;
     if !nodes.contains_key(&node) {
         return (
             StatusCode::NOT_FOUND,
             [("Content-Type", "application/soap+xml")],
-            soap_fault("ter:InvalidArgVal", &format!("Node '{}' not found", node)),
+            templates::fault("ter:InvalidArgVal", &format!("Node '{}' not found", node)),
         );
     }
     drop(nodes);
 
     let response = match action.as_str() {
-        "GetProfiles" => {
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
-            xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
-            xmlns:tt="http://www.onvif.org/ver10/schema">
-  <s:Body>
-    <trt:GetProfilesResponse>
-      <trt:Profiles token="profile_{}" fixed="true">
-        <tt:Name>{}</tt:Name>
-        <tt:VideoSourceConfiguration token="vsrc_{}">
-          <tt:Name>VideoSource</tt:Name>
-        </tt:VideoSourceConfiguration>
-        <tt:VideoEncoderConfiguration token="venc_{}">
-          <tt:Name>H264</tt:Name>
-          <tt:Encoding>H264</tt:Encoding>
-        </tt:VideoEncoderConfiguration>
-        <tt:PTZConfiguration token="ptz_{}">
-          <tt:Name>PTZ</tt:Name>
-        </tt:PTZConfiguration>
-      </trt:Profiles>
-    </trt:GetProfilesResponse>
-  </s:Body>
-</s:Envelope>"#,
-                node, node, node, node, node
-            )
-        }
-
-        "GetStreamUri" => {
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
-            xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
-            xmlns:tt="http://www.onvif.org/ver10/schema">
-  <s:Body>
-    <trt:GetStreamUriResponse>
-      <trt:MediaUri>
-        <tt:Uri>rtsp://{}:8554/{}/stream</tt:Uri>
-        <tt:InvalidAfterConnect>false</tt:InvalidAfterConnect>
-        <tt:InvalidAfterReboot>false</tt:InvalidAfterReboot>
-      </trt:MediaUri>
-    </trt:GetStreamUriResponse>
-  </s:Body>
-</s:Envelope>"#,
-                state.local_ip, node
-            )
-        }
-
-        _ => soap_fault("ActionNotSupported", &format!("Unknown action: {}", action)),
+        "GetProfiles" => templates::get_profiles(&node),
+        "GetStreamUri" => templates::get_stream_uri(&state.local_ip, &node),
+        _ => templates::fault("ActionNotSupported", &format!("Unknown action: {}", action)),
     };
 
     (
@@ -328,19 +195,17 @@ async fn handle_ptz_service(
     State(state): State<Arc<OnvifServerState>>,
     body: String,
 ) -> impl IntoResponse {
-    // Check authentication
     if let Err(reason) = check_auth(&body, &state) {
         return (
             StatusCode::UNAUTHORIZED,
             [("Content-Type", "application/soap+xml")],
-            soap_auth_fault(&reason),
+            templates::auth_fault(&reason),
         );
     }
 
     let action = extract_soap_action(&body);
     println!("[ONVIF] PTZ service for '{}': {}", node, action);
 
-    // Get node handle
     let nodes = state.nodes.lock().await;
     let node_handle = match nodes.get(&node) {
         Some(h) => h.clone(),
@@ -348,7 +213,7 @@ async fn handle_ptz_service(
             return (
                 StatusCode::NOT_FOUND,
                 [("Content-Type", "application/soap+xml")],
-                soap_fault("ter:InvalidArgVal", &format!("Node '{}' not found", node)),
+                templates::fault("ter:InvalidArgVal", &format!("Node '{}' not found", node)),
             );
         }
     };
@@ -362,24 +227,15 @@ async fn handle_ptz_service(
                 node, pan, tilt, zoom
             );
 
-            // Translate to our command format
             let cmd = format!("CMD|ptz {} {} {}", pan, tilt, zoom);
             if let Err(e) = node_handle.cmd_tx.send(cmd).await {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [("Content-Type", "application/soap+xml")],
-                    soap_fault("ter:Action", &format!("Failed to send command: {}", e)),
+                    templates::fault("ter:Action", &format!("Failed to send command: {}", e)),
                 );
             }
-
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
-            xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
-  <s:Body>
-    <tptz:ContinuousMoveResponse/>
-  </s:Body>
-</s:Envelope>"#
-                .to_string()
+            templates::continuous_move_response().to_string()
         }
 
         "Stop" => {
@@ -390,18 +246,10 @@ async fn handle_ptz_service(
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [("Content-Type", "application/soap+xml")],
-                    soap_fault("ter:Action", &format!("Failed to send command: {}", e)),
+                    templates::fault("ter:Action", &format!("Failed to send command: {}", e)),
                 );
             }
-
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
-            xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
-  <s:Body>
-    <tptz:StopResponse/>
-  </s:Body>
-</s:Envelope>"#
-                .to_string()
+            templates::stop_response().to_string()
         }
 
         "AbsoluteMove" => {
@@ -416,18 +264,10 @@ async fn handle_ptz_service(
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [("Content-Type", "application/soap+xml")],
-                    soap_fault("ter:Action", &format!("Failed to send command: {}", e)),
+                    templates::fault("ter:Action", &format!("Failed to send command: {}", e)),
                 );
             }
-
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
-            xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
-  <s:Body>
-    <tptz:AbsoluteMoveResponse/>
-  </s:Body>
-</s:Envelope>"#
-                .to_string()
+            templates::absolute_move_response().to_string()
         }
 
         "GotoHomePosition" => {
@@ -438,99 +278,22 @@ async fn handle_ptz_service(
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [("Content-Type", "application/soap+xml")],
-                    soap_fault("ter:Action", &format!("Failed to send command: {}", e)),
+                    templates::fault("ter:Action", &format!("Failed to send command: {}", e)),
                 );
             }
-
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
-            xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
-  <s:Body>
-    <tptz:GotoHomePositionResponse/>
-  </s:Body>
-</s:Envelope>"#
-                .to_string()
+            templates::goto_home_response().to_string()
         }
 
         "GetStatus" => {
-            // For status, we'd need to wait for response from remote
-            // For now, return a default position
             // TODO: Implement request-response pattern for status queries
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
-            xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"
-            xmlns:tt="http://www.onvif.org/ver10/schema">
-  <s:Body>
-    <tptz:GetStatusResponse>
-      <tptz:PTZStatus>
-        <tt:Position>
-          <tt:PanTilt x="0.00" y="0.00"/>
-          <tt:Zoom x="0.00"/>
-        </tt:Position>
-        <tt:MoveStatus>
-          <tt:PanTilt>IDLE</tt:PanTilt>
-          <tt:Zoom>IDLE</tt:Zoom>
-        </tt:MoveStatus>
-      </tptz:PTZStatus>
-    </tptz:GetStatusResponse>
-  </s:Body>
-</s:Envelope>"#
-                .to_string()
+            templates::get_status_response().to_string()
         }
 
-        "GetConfigurations" => {
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
-            xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"
-            xmlns:tt="http://www.onvif.org/ver10/schema">
-  <s:Body>
-    <tptz:GetConfigurationsResponse>
-      <tptz:PTZConfiguration token="ptz_{}">
-        <tt:Name>PTZ Configuration</tt:Name>
-        <tt:UseCount>1</tt:UseCount>
-        <tt:NodeToken>ptz_node_{}</tt:NodeToken>
-        <tt:DefaultContinuousPanTiltVelocitySpace>http://www.onvif.org/ver10/tptz/PanTiltSpaces/VelocityGenericSpace</tt:DefaultContinuousPanTiltVelocitySpace>
-        <tt:DefaultContinuousZoomVelocitySpace>http://www.onvif.org/ver10/tptz/ZoomSpaces/VelocityGenericSpace</tt:DefaultContinuousZoomVelocitySpace>
-      </tptz:PTZConfiguration>
-    </tptz:GetConfigurationsResponse>
-  </s:Body>
-</s:Envelope>"#,
-                node, node
-            )
-        }
+        "GetConfigurations" => templates::get_configurations(&node),
 
-        "GetNodes" => {
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
-            xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"
-            xmlns:tt="http://www.onvif.org/ver10/schema">
-  <s:Body>
-    <tptz:GetNodesResponse>
-      <tptz:PTZNode token="ptz_node_{}">
-        <tt:Name>{} PTZ</tt:Name>
-        <tt:SupportedPTZSpaces>
-          <tt:ContinuousPanTiltVelocitySpace>
-            <tt:URI>http://www.onvif.org/ver10/tptz/PanTiltSpaces/VelocityGenericSpace</tt:URI>
-            <tt:XRange><tt:Min>-1</tt:Min><tt:Max>1</tt:Max></tt:XRange>
-            <tt:YRange><tt:Min>-1</tt:Min><tt:Max>1</tt:Max></tt:YRange>
-          </tt:ContinuousPanTiltVelocitySpace>
-          <tt:ContinuousZoomVelocitySpace>
-            <tt:URI>http://www.onvif.org/ver10/tptz/ZoomSpaces/VelocityGenericSpace</tt:URI>
-            <tt:XRange><tt:Min>-1</tt:Min><tt:Max>1</tt:Max></tt:XRange>
-          </tt:ContinuousZoomVelocitySpace>
-        </tt:SupportedPTZSpaces>
-        <tt:HomeSupported>true</tt:HomeSupported>
-      </tptz:PTZNode>
-    </tptz:GetNodesResponse>
-  </s:Body>
-</s:Envelope>"#,
-                node, node
-            )
-        }
+        "GetNodes" => templates::get_nodes(&node),
 
-        _ => soap_fault("ActionNotSupported", &format!("Unknown action: {}", action)),
+        _ => templates::fault("ActionNotSupported", &format!("Unknown action: {}", action)),
     };
 
     (
@@ -551,13 +314,11 @@ pub fn extract_soap_action(xml: &str) -> String {
                 let local_name = e.local_name();
                 let name = String::from_utf8_lossy(local_name.as_ref()).to_string();
 
-                // Track when we enter the Body element
                 if name == "Body" {
                     in_body = true;
                     continue;
                 }
 
-                // Only return actions from within the Body
                 if in_body && name != "Envelope" {
                     return name;
                 }
@@ -630,29 +391,6 @@ pub fn extract_velocity(xml: &str) -> (f32, f32, f32) {
 /// Extract position from ONVIF AbsoluteMove request (same format as velocity)
 pub fn extract_position(xml: &str) -> (f32, f32, f32) {
     extract_velocity(xml)
-}
-
-/// Generate SOAP fault response
-pub fn soap_fault(code: &str, reason: &str) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
-  <s:Body>
-    <s:Fault>
-      <s:Code>
-        <s:Value>s:Sender</s:Value>
-        <s:Subcode>
-          <s:Value>{}</s:Value>
-        </s:Subcode>
-      </s:Code>
-      <s:Reason>
-        <s:Text xml:lang="en">{}</s:Text>
-      </s:Reason>
-    </s:Fault>
-  </s:Body>
-</s:Envelope>"#,
-        code, reason
-    )
 }
 
 /// Get the local IP address by connecting to an external address
