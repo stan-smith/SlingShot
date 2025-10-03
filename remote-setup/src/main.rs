@@ -1,3 +1,4 @@
+mod storage;
 mod systemd;
 mod wizard;
 

@@ -1,3 +1,4 @@
+use crate::storage;
 use anyhow::Result;
 use config_manager::{
     AdaptiveConfig, AdaptivePriority, OnvifConfig, RecordingConfig, RemoteConfig, RtspConfig,
@@ -5,7 +6,6 @@ use config_manager::{
 };
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
 use onvif_client::OnvifClient;
-use std::path::PathBuf;
 
 /// Run the full configuration wizard
 pub fn run_wizard() -> Result<()> {
@@ -247,21 +247,8 @@ fn configure_recording(existing: &Option<RemoteConfig>) -> Result<RecordingConfi
 }
 
 fn configure_storage(existing: &Option<RemoteConfig>) -> Result<StorageConfig> {
-    let existing_storage = existing.as_ref().map(|c| &c.storage);
-    let default_path = existing_storage
-        .map(|s| s.mountpoint.to_string_lossy().to_string())
-        .unwrap_or_else(|| "/media/recordings".to_string());
-
-    let mountpoint: String = Input::with_theme(&ColorfulTheme::default())
-        .with_prompt("Storage mountpoint for recordings")
-        .default(default_path)
-        .interact_text()?;
-
-    Ok(StorageConfig::new(
-        String::new(),
-        String::new(),
-        PathBuf::from(mountpoint),
-    ))
+    // Use the new interactive storage configuration from the storage module
+    storage::configure_storage_interactive(existing)
 }
 
 fn configure_encryption(existing: &Option<RemoteConfig>) -> Result<bool> {
