@@ -102,9 +102,7 @@ async fn async_main() -> Result<()> {
         None
     };
 
-    println!("==========================================");
-    println!("RTSP STREAM CONTROLLER - Central Node");
-    println!("==========================================");
+    println!("~ RTSP STREAM CONTROLLER - Central Node ~");
     println!();
 
     // Create RTSP server for relaying streams
@@ -427,14 +425,12 @@ async fn handle_connection(
     let video_mode = parts[3] == "VIDEO";
     let encryption_requested = parts.get(4).map(|&s| s == "ENCRYPT").unwrap_or(false);
 
-    println!("==========================================");
-    println!("AUTHENTICATION REQUEST");
+    println!("~ AUTHENTICATION REQUEST ~");
     println!("  Node: {}", node_name);
     println!("  Address: {}", remote);
     println!("  Fingerprint: {}", &fingerprint[..32.min(fingerprint.len())]);
     println!("  Video Mode: {}", if video_mode { "QUIC" } else { "Legacy RTSP" });
     println!("  Encryption: {}", if encryption_requested { "requested" } else { "not requested" });
-    println!("==========================================");
 
     // Check if fingerprint is already approved
     let approved = {

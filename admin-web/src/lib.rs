@@ -139,7 +139,7 @@ async fn ws_handler(
 async fn handle_socket(socket: WebSocket, state: Arc<AdminState>) {
     let (mut ws_tx, mut ws_rx) = socket.split();
 
-    // ========== Authentication Phase ==========
+    // ~ Authentication Phase ~
     // Wait for TOTP or TOKEN message (timeout 30s)
     let auth_result = tokio::time::timeout(Duration::from_secs(30), ws_rx.next()).await;
 
@@ -197,7 +197,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AdminState>) {
     // Track role for permission checks
     let is_admin = user_role == "admin";
 
-    // ========== Authenticated Session ==========
+    // ~ Authenticated Session ~
     let (tx, mut rx) = mpsc::channel::<String>(100);
     let session_id = state.next_id().await;
 
@@ -300,19 +300,19 @@ async fn handle_socket(socket: WebSocket, state: Arc<AdminState>) {
                 }
                 "help" => {
                     let help_lines = [
-                        "=== Admin Commands ===",
+                        "~ Admin Commands ~",
                         "  nodes / list          - List connected nodes",
                         "  pending               - List nodes awaiting approval",
                         "  approve <name>        - Approve pending node",
                         "  reject <name>         - Reject pending node",
                         "",
-                        "=== Node Commands ===",
+                        "~ Node Commands ~",
                         "  <node> params         - Show current stream parameters",
                         "  <node> res <w> <h>    - Set resolution",
                         "  <node> bitrate <kbps> - Set bitrate",
                         "  <node> fps <rate>     - Set framerate",
                         "",
-                        "=== PTZ Commands ===",
+                        "~ PTZ Commands ~",
                         "  <node> left [spd] [ms]   - Pan left",
                         "  <node> right [spd] [ms]  - Pan right",
                         "  <node> up [spd] [ms]     - Tilt up",
@@ -330,7 +330,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AdminState>) {
                         }
                     }
                 }
-                // ========== User Management Commands (Admin Only) ==========
+                // ~ User Management Commands (Admin Only) ~
                 "users" => {
                     if !is_admin {
                         if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {

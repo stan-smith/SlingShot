@@ -398,9 +398,7 @@ fn check_pipeline_bus(pipeline: &gstreamer::Pipeline) -> Option<String> {
 async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    println!("==========================================");
-    println!("RTSP REMOTE NODE: {}", config.node_name);
-    println!("==========================================");
+    println!("~ RTSP REMOTE NODE: {} ~", config.node_name);
     if debug {
         println!("Debug mode enabled (verbose metrics)");
     }
@@ -1071,9 +1069,7 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
             let _ = marker_stream.finish();
 
             println!();
-            println!("==========================================");
-            println!("READY - Streaming video (stream-per-frame)");
-            println!("==========================================");
+            println!("~ READY - Streaming video (stream-per-frame) ~");
             println!();
 
             // Video frame stats (integrated into main loop for reconnection support)

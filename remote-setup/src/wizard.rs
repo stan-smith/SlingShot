@@ -10,7 +10,7 @@ use onvif_client::OnvifClient;
 /// Run the full configuration wizard
 pub fn run_wizard() -> Result<()> {
     println!();
-    println!("--- Node Configuration ---");
+    println!("~ Node Configuration ~");
     println!();
 
     // Load existing config if available for defaults
@@ -41,7 +41,7 @@ pub fn run_wizard() -> Result<()> {
         .interact_text()?;
 
     println!();
-    println!("--- Video Source ---");
+    println!("~ Video Source ~");
     println!();
 
     // Source type selection
@@ -65,20 +65,20 @@ pub fn run_wizard() -> Result<()> {
     };
 
     println!();
-    println!("--- Local Recording ---");
+    println!("~ Local Recording ~");
     println!();
 
     let recording = configure_recording(&existing)?;
     let storage = configure_storage(&existing)?;
 
     println!();
-    println!("--- Security ---");
+    println!("~ Security ~");
     println!();
 
     let encryption_enabled = configure_encryption(&existing)?;
 
     println!();
-    println!("--- Streaming ---");
+    println!("~ Streaming ~");
     println!();
 
     let adaptive = configure_adaptive(&existing)?;
@@ -96,7 +96,7 @@ pub fn run_wizard() -> Result<()> {
 
     // Show summary
     println!();
-    println!("--- Summary ---");
+    println!("~ Summary ~");
     println!();
     print_config_summary(&config);
 

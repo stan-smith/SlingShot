@@ -91,9 +91,7 @@ impl Storage {
     /// Run interactive storage setup (select device, format, mount)
     /// Returns Ok(Some(config)) if setup completed with new config, Ok(None) if skipped
     pub fn setup_interactive(&self) -> Result<Option<CfgStorageConfig>, String> {
-        println!("\n========================================");
-        println!("STORAGE SETUP");
-        println!("========================================\n");
+        println!("\n~ STORAGE SETUP ~\n");
 
         if self.is_configured() && self.is_available() {
             println!(

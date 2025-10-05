@@ -7,7 +7,7 @@ use gstreamer_rtsp_server::prelude::*;
 fn main() -> Result<()> {
     gstreamer::init()?;
 
-    println!("=== Simple RTSP Test Server ===");
+    println!("~ Simple RTSP Test Server ~");
 
     // Create RTSP server with direct videotestsrc pipeline (no appsrc)
     let rtsp_server = gstreamer_rtsp_server::RTSPServer::new();

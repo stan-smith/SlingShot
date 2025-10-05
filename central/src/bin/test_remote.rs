@@ -17,7 +17,30 @@ use axum::{
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
-use onvif_server::{extract_position, extract_soap_action, extract_velocity, get_local_ip, soap_fault};
+use onvif_server::{extract_position, extract_soap_action, extract_velocity, get_local_ip};
+
+/// Generate SOAP fault response
+fn soap_fault(code: &str, reason: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
+  <s:Body>
+    <s:Fault>
+      <s:Code>
+        <s:Value>s:Sender</s:Value>
+        <s:Subcode>
+          <s:Value>{}</s:Value>
+        </s:Subcode>
+      </s:Code>
+      <s:Reason>
+        <s:Text xml:lang="en">{}</s:Text>
+      </s:Reason>
+    </s:Fault>
+  </s:Body>
+</s:Envelope>"#,
+        code, reason
+    )
+}
 use quinn::Endpoint;
 use std::env;
 use std::net::SocketAddr;
@@ -106,9 +129,7 @@ fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(8082u16);
 
-    println!("==========================================");
-    println!("TEST REMOTE - Fake ONVIF Camera (QUIC)");
-    println!("==========================================");
+    println!("~ TEST REMOTE - Fake ONVIF Camera (QUIC) ~");
     println!();
     println!("Usage: test_remote [name] [central:port] [--file path]");
     println!();
@@ -399,9 +420,7 @@ async fn async_main(
     marker_stream.finish()?;
 
     println!();
-    println!("==========================================");
-    println!("READY - Streaming video (stream-per-frame)");
-    println!("==========================================");
+    println!("~ READY - Streaming video (stream-per-frame) ~");
     println!();
 
     // Spawn video sender task - one QUIC stream per frame

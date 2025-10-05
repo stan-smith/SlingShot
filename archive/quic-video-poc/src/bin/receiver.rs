@@ -23,7 +23,7 @@ fn main() -> Result<()> {
     gstreamer::init()?;
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    println!("=== QUIC Video POC - Receiver ===");
+    println!("~ QUIC Video POC - Receiver ~");
     println!();
 
     // Create RTSP server

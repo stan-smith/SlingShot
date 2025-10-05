@@ -622,11 +622,11 @@ function connectWebSocket() {
     statusText.textContent = 'Disconnected';
     // Only auto-reconnect if we have a session token
     if (sessionToken) {
-      append('--- Disconnected, reconnecting... ---', 'system');
+      append('~ Disconnected, reconnecting... ~', 'system');
       setTimeout(connectWebSocket, 3000);
     }
   };
-  ws.onerror = () => append('--- Error ---', 'error');
+  ws.onerror = () => append('~ Error ~', 'error');
   ws.onmessage = handleMessage;
 }
 
@@ -651,7 +651,7 @@ function handleMessage(e) {
     }
     statusDot.classList.add('connected');
     statusText.textContent = 'Connected';
-    append('--- Authenticated as ' + role + ' ---', 'system');
+    append('~ Authenticated as ' + role + ' ~', 'system');
     ws.send('nodes');
     return;
   } else if (msg === 'AUTH_FAILED') {

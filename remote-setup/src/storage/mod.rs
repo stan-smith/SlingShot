@@ -24,7 +24,7 @@ pub fn configure_storage_interactive(
     existing: &Option<config_manager::RemoteConfig>,
 ) -> Result<StorageConfig> {
     println!();
-    println!("--- Storage Configuration ---");
+    println!("~ Storage Configuration ~");
     println!();
     println!("Detecting available storage devices...");
 

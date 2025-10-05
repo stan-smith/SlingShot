@@ -44,7 +44,7 @@ pub fn install_service() -> Result<()> {
 
     let config = RemoteConfig::load()?;
 
-    println!("--- Systemd Service Installation ---");
+    println!("~ Systemd Service Installation ~");
     println!();
 
     // Get current user info
@@ -195,7 +195,7 @@ pub fn install_service() -> Result<()> {
 
 /// Uninstall the systemd service
 pub fn uninstall_service() -> Result<()> {
-    println!("--- Systemd Service Uninstall ---");
+    println!("~ Systemd Service Uninstall ~");
     println!();
 
     if !std::path::Path::new(SERVICE_FILE).exists() {

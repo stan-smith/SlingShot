@@ -58,9 +58,7 @@ fn main() -> Result<()> {
 
 fn run_menu() -> Result<()> {
     println!();
-    println!("==========================================");
-    println!("     KAIJU REMOTE NODE SETUP");
-    println!("==========================================");
+    println!("~ KAIJU REMOTE NODE SETUP ~");
     println!();
 
     loop {
@@ -137,7 +135,7 @@ fn run_menu() -> Result<()> {
 }
 
 fn show_status() -> Result<()> {
-    println!("--- Current Configuration ---");
+    println!("~ Current Configuration ~");
     println!();
 
     if !RemoteConfig::exists() {
@@ -172,7 +170,7 @@ fn show_status() -> Result<()> {
     }
 
     println!();
-    println!("--- Service Status ---");
+    println!("~ Service Status ~");
     println!();
     println!("{}", systemd::get_service_status());
 

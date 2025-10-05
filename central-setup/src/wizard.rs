@@ -53,7 +53,7 @@ fn get_interfaces() -> Vec<InterfaceInfo> {
 /// Run the full configuration wizard
 pub fn run_wizard() -> Result<()> {
     println!();
-    println!("--- Central Node Configuration ---");
+    println!("~ Central Node Configuration ~");
     println!();
 
     // Load existing config if available for defaults
@@ -86,7 +86,7 @@ pub fn run_wizard() -> Result<()> {
 
 fn finish_wizard(existing: Option<CentralConfig>, bind_interface: String) -> Result<()> {
     println!();
-    println!("--- Port Configuration ---");
+    println!("~ Port Configuration ~");
     println!();
 
     let defaults = existing.as_ref().cloned().unwrap_or_default();
@@ -122,7 +122,7 @@ fn finish_wizard(existing: Option<CentralConfig>, bind_interface: String) -> Res
 
     // Show summary
     println!();
-    println!("--- Summary ---");
+    println!("~ Summary ~");
     println!();
     println!("Bind interface:  {}", bind_interface);
     println!("Admin web port:  {}", admin_port);
@@ -189,7 +189,7 @@ fn setup_admin_user() -> Result<()> {
     }
 
     println!();
-    println!("=== Admin User Setup (TOTP) ===");
+    println!("~ Admin User Setup (TOTP) ~");
     println!();
 
     let username: String = Input::with_theme(&ColorfulTheme::default())
@@ -244,7 +244,7 @@ fn setup_admin_user() -> Result<()> {
 /// Setup ONVIF credentials for VMS authentication
 fn setup_onvif_credentials() -> Result<()> {
     println!();
-    println!("=== ONVIF Credentials ===");
+    println!("~ ONVIF Credentials ~");
     println!();
 
     if OnvifAuthConfig::exists() {
@@ -288,7 +288,7 @@ fn setup_onvif_credentials() -> Result<()> {
 /// Setup audit logging configuration
 fn setup_audit_logging() -> Result<()> {
     println!();
-    println!("=== Audit Logging ===");
+    println!("~ Audit Logging ~");
     println!();
 
     let existing = AuditConfig::load().ok();

@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
     gstreamer::init()?;
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    println!("=== QUIC Video POC - Sender ===");
+    println!("~ QUIC Video POC - Sender ~");
     println!();
 
     // Create channel for video frames

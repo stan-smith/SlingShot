@@ -81,7 +81,7 @@ fn run() -> Result<(), SelectorError> {
 }
 
 fn print_selection_summary(config: &StorageConfig) {
-    println!("\n--- Selection Summary ---");
+    println!("\n~ Selection Summary ~");
     println!("  Device:     {}", config.device);
     println!("  Type:       {}", config.device_type);
     println!("  Size:       {}", config.size);

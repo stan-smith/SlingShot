@@ -51,9 +51,7 @@ fn main() -> Result<()> {
 
 fn run_menu() -> Result<()> {
     println!();
-    println!("==========================================");
-    println!("     KAIJU CENTRAL NODE SETUP");
-    println!("==========================================");
+    println!("~ KAIJU CENTRAL NODE SETUP ~");
     println!();
 
     loop {
@@ -185,7 +183,7 @@ fn run_menu() -> Result<()> {
 }
 
 fn show_status() -> Result<()> {
-    println!("--- Current Configuration ---");
+    println!("~ Current Configuration ~");
     println!();
 
     let config = if CentralConfig::exists() {
@@ -219,7 +217,7 @@ fn show_status() -> Result<()> {
     }
 
     println!();
-    println!("--- Service Status ---");
+    println!("~ Service Status ~");
     println!();
     println!("Systemd service: {}", systemd::get_service_status());
 
