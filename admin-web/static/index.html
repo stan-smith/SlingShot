@@ -2,6 +2,7 @@
 <html>
 <head>
 <title>SlingShot Admin</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.4.14/dist/hls.min.js"></script>
 <style>
 :root {
   --bg-primary: #1a1a1a;
@@ -28,7 +29,7 @@ body {
 .app {
   display: grid;
   grid-template-rows: 50px minmax(0, 1fr) 45px;
-  grid-template-columns: 220px 1fr 280px;
+  grid-template-columns: 180px 1fr 260px 260px;
   height: 100vh;
   max-height: 100vh;
 }
@@ -57,10 +58,61 @@ body {
   padding: 12px;
   min-height: 0;
 }
+.video-panel {
+  background: #111;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.video-container {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  min-height: 0;
+  position: relative;
+}
+#video-player {
+  max-width: 100%;
+  max-height: 100%;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+#video-placeholder {
+  position: absolute;
+  color: var(--text-muted);
+  font-size: 14px;
+  text-align: center;
+}
+.video-controls {
+  background: var(--bg-secondary);
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.video-mode-btn {
+  padding: 6px 12px;
+  background: var(--bg-tertiary);
+}
+.video-mode-btn.active {
+  background: rgba(0,255,0,0.15);
+  border-color: var(--text-primary);
+}
+#video-status {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+}
 .control-panel {
   background: var(--bg-tertiary);
+  border-left: 1px solid var(--border-color);
   overflow-y: auto;
-  padding: 16px;
+  padding: 12px;
   min-height: 0;
 }
 .log-panel {
@@ -138,16 +190,16 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
 .tabs {
   display: flex;
   border-bottom: 1px solid var(--border-color);
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 }
 .tab {
-  padding: 8px 16px;
+  padding: 6px 12px;
   cursor: pointer;
   border: none;
   background: transparent;
   color: var(--text-muted);
   border-bottom: 2px solid transparent;
-  font-size: 12px;
+  font-size: 11px;
 }
 .tab:hover { color: var(--text-secondary); }
 .tab.active { color: var(--text-primary); border-bottom-color: var(--text-primary); }
@@ -155,34 +207,35 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
 .tab-content.active { display: block; }
 /* Control sections */
 .control-section {
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 .control-section h3 {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: normal;
   color: var(--text-muted);
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 .preset-buttons {
   display: flex;
-  gap: 6px;
+  gap: 4px;
   flex-wrap: wrap;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 .preset-buttons button {
-  min-width: 60px;
+  min-width: 50px;
+  padding: 4px 6px;
 }
 .custom-input {
   display: flex;
-  gap: 6px;
+  gap: 4px;
   align-items: center;
 }
 .custom-input input {
-  width: 70px;
+  width: 60px;
   background: var(--bg-primary);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
-  padding: 4px 8px;
+  padding: 4px 6px;
   font-family: inherit;
   font-size: 11px;
 }
@@ -191,11 +244,11 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
 }
 .ptz-settings {
   display: flex;
-  gap: 20px;
+  gap: 16px;
   width: 100%;
   justify-content: center;
 }
@@ -212,20 +265,20 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
   background: var(--bg-primary);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
-  padding: 4px 8px;
+  padding: 4px 6px;
   font-family: inherit;
   font-size: 11px;
 }
 .dpad {
   display: grid;
-  grid-template-columns: repeat(3, 50px);
-  grid-template-rows: repeat(3, 50px);
-  gap: 4px;
+  grid-template-columns: repeat(3, 40px);
+  grid-template-rows: repeat(3, 40px);
+  gap: 3px;
 }
 .dpad button {
-  width: 50px;
-  height: 50px;
-  font-size: 18px;
+  width: 40px;
+  height: 40px;
+  font-size: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -233,36 +286,39 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
 .dpad-center { background: var(--bg-primary); }
 .zoom-buttons {
   display: flex;
-  gap: 8px;
+  gap: 6px;
 }
 .zoom-buttons button {
-  padding: 8px 16px;
+  padding: 6px 12px;
 }
 .ptz-actions {
   display: flex;
-  gap: 8px;
+  gap: 6px;
 }
 /* Recording */
 .quick-buttons {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 16px;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.quick-buttons button {
+  padding: 4px 8px;
 }
 .date-inputs {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-bottom: 12px;
+  gap: 6px;
+  margin-bottom: 10px;
 }
 .date-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 .date-row label {
-  width: 40px;
-  font-size: 11px;
+  width: 35px;
+  font-size: 10px;
   color: var(--text-muted);
 }
 .date-row input {
@@ -270,18 +326,30 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
   background: var(--bg-primary);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
-  padding: 4px 8px;
+  padding: 4px 6px;
   font-family: inherit;
-  font-size: 11px;
+  font-size: 10px;
+}
+.recording-actions {
+  display: flex;
+  gap: 6px;
+}
+.recording-actions button {
+  flex: 1;
+  padding: 6px;
+}
+.play-btn {
+  background: rgba(0,255,0,0.1);
+  border-color: var(--text-primary);
 }
 /* Placeholder */
 .placeholder {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 200px;
+  height: 100px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 11px;
 }
 /* Log */
 .log-header {
@@ -292,7 +360,7 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
   justify-content: space-between;
   font-size: 11px;
 }
-.log-controls { display: flex; gap: 8px; align-items: center; }
+.log-controls { display: flex; gap: 6px; align-items: center; }
 .log-controls select {
   background: var(--bg-primary);
   color: var(--text-primary);
@@ -304,7 +372,7 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
   flex: 1;
   overflow-y: auto;
   padding: 8px 12px;
-  font-size: 11px;
+  font-size: 10px;
   white-space: pre-wrap;
 }
 .log-line { padding: 2px 0; }
@@ -409,7 +477,19 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
     <div id="pending-nodes"><div class="no-items">No pending nodes</div></div>
   </aside>
 
-  <main class="control-panel">
+  <main class="video-panel">
+    <div class="video-container">
+      <video id="video-player" playsinline muted></video>
+      <div id="video-placeholder">Select a node to view stream</div>
+    </div>
+    <div class="video-controls">
+      <button class="video-mode-btn active" data-mode="live" onclick="setVideoMode('live')">Live</button>
+      <button class="video-mode-btn" data-mode="recording" onclick="setVideoMode('recording')">Recording</button>
+      <span id="video-status"></span>
+    </div>
+  </main>
+
+  <aside class="control-panel">
     <div class="tabs">
       <button class="tab active" data-tab="stream">Stream</button>
       <button class="tab" data-tab="ptz">PTZ</button>
@@ -424,10 +504,8 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
           <div class="preset-buttons">
             <button onclick="setResolution(1920, 1080)">1080p</button>
             <button onclick="setResolution(1280, 720)">720p</button>
-            <button onclick="setResolution(1024, 576)">576p</button>
             <button onclick="setResolution(854, 480)">480p</button>
             <button onclick="setResolution(640, 360)">360p</button>
-            <button onclick="setResolution(426, 240)">240p</button>
           </div>
           <div class="custom-input">
             <input type="number" id="res-w" placeholder="W" value="1280">
@@ -439,7 +517,7 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
         <div class="control-section">
           <h3>Bitrate (kbps)</h3>
           <div class="custom-input">
-            <input type="number" id="bitrate" placeholder="kbps" value="2000" min="100" max="20000" style="width:100px">
+            <input type="number" id="bitrate" placeholder="kbps" value="2000" min="100" max="20000" style="width:80px">
             <button onclick="setBitrate()">Set</button>
           </div>
         </div>
@@ -452,8 +530,8 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
             <button onclick="setFps(10)">10</button>
           </div>
         </div>
-        <button onclick="getParams()" style="width:100%;margin-top:10px">Refresh Parameters</button>
-        <button onclick="restartPipeline()" style="width:100%;margin-top:8px;border-color:var(--accent-yellow);color:var(--accent-yellow)">Restart Pipeline</button>
+        <button onclick="getParams()" style="width:100%;margin-top:8px">Refresh Params</button>
+        <button onclick="restartPipeline()" style="width:100%;margin-top:6px;border-color:var(--accent-yellow);color:var(--accent-yellow)">Restart Pipeline</button>
       </div>
 
       <!-- PTZ Tab -->
@@ -462,7 +540,7 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
           <div class="ptz-settings">
             <div class="ptz-setting">
               <label>Speed</label>
-              <input type="range" id="ptz-speed" min="0.1" max="1" step="0.1" value="0.5" style="width:80px">
+              <input type="range" id="ptz-speed" min="0.1" max="1" step="0.1" value="0.5" style="width:70px">
             </div>
             <div class="ptz-setting">
               <label>Duration</label>
@@ -486,8 +564,8 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
             <div></div>
           </div>
           <div class="zoom-buttons">
-            <button onmousedown="ptzMove('zoomout')" onmouseup="ptzStop()" onmouseleave="ptzStop()">- Zoom</button>
-            <button onmousedown="ptzMove('zoomin')" onmouseup="ptzStop()" onmouseleave="ptzStop()">Zoom +</button>
+            <button onmousedown="ptzMove('zoomout')" onmouseup="ptzStop()" onmouseleave="ptzStop()">-</button>
+            <button onmousedown="ptzMove('zoomin')" onmouseup="ptzStop()" onmouseleave="ptzStop()">+</button>
           </div>
           <div class="ptz-actions">
             <button onclick="ptzStop()">Stop</button>
@@ -500,14 +578,13 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
       <!-- Recording Tab -->
       <div id="tab-recording" class="tab-content">
         <div class="control-section">
-          <h3>Quick Select</h3>
+          <h3>Quick Play</h3>
           <div class="quick-buttons">
-            <button onclick="getRecordings('5 mins ago')">5 min</button>
-            <button onclick="getRecordings('15 mins ago')">15 min</button>
-            <button onclick="getRecordings('last hour')">1 hour</button>
-            <button onclick="getRecordings('2 hours ago')">2 hours</button>
-            <button onclick="getRecordings('since midnight')">Today</button>
-            <button onclick="getRecordings('since yesterday')">Yesterday</button>
+            <button onclick="playRecordingQuick('5 mins ago')">5m</button>
+            <button onclick="playRecordingQuick('15 mins ago')">15m</button>
+            <button onclick="playRecordingQuick('last hour')">1h</button>
+            <button onclick="playRecordingQuick('2 hours ago')">2h</button>
+            <button onclick="playRecordingQuick('since midnight')">Today</button>
           </div>
         </div>
         <div class="control-section">
@@ -522,11 +599,14 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
               <input type="datetime-local" id="rec-to">
             </div>
           </div>
-          <button onclick="getCustomRecordings()">Retrieve</button>
+          <div class="recording-actions">
+            <button class="play-btn" onclick="playCustomRecording()">Play</button>
+            <button onclick="getCustomRecordings()">Download</button>
+          </div>
         </div>
       </div>
     </div>
-  </main>
+  </aside>
 
   <aside class="log-panel">
     <div class="log-header">
@@ -559,11 +639,18 @@ let pendingNodes = new Map();
 let commandHistory = [];
 let historyIndex = -1;
 let ptzContinuous = false;
+let videoMode = 'live';
 
 // Authentication state
 let sessionToken = localStorage.getItem('admin_session');
 let pendingCredentials = null;
 let userRole = null;
+
+// HLS Player
+let hls = null;
+const video = document.getElementById('video-player');
+const videoPlaceholder = document.getElementById('video-placeholder');
+const videoStatus = document.getElementById('video-status');
 
 // DOM elements
 const log = document.getElementById('log');
@@ -576,10 +663,128 @@ const logoutBtn = document.getElementById('logout-btn');
 const adminLink = document.getElementById('admin-link');
 
 // Initialize
+initHls();
 setupTabs();
 if (sessionToken) {
-  // Try to reconnect with saved session
   connectWebSocket();
+}
+
+function initHls() {
+  if (Hls.isSupported()) {
+    hls = new Hls({
+      liveSyncDuration: 3,
+      liveMaxLatencyDuration: 10,
+      enableWorker: true,
+      lowLatencyMode: true,
+    });
+    hls.attachMedia(video);
+
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      video.play().catch(() => {});
+      videoStatus.textContent = 'Playing';
+    });
+
+    hls.on(Hls.Events.ERROR, (event, data) => {
+      if (data.fatal) {
+        videoStatus.textContent = 'Error: ' + data.type;
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          setTimeout(() => {
+            if (hls) hls.startLoad();
+          }, 3000);
+        }
+      }
+    });
+
+    hls.on(Hls.Events.FRAG_BUFFERED, () => {
+      videoStatus.textContent = 'Playing';
+    });
+  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    // Native HLS support (Safari)
+    video.addEventListener('loadedmetadata', () => video.play());
+  }
+}
+
+function playLive(nodeName) {
+  if (!nodeName) return;
+  videoPlaceholder.style.display = 'none';
+  video.style.display = 'block';
+  videoStatus.textContent = 'Connecting...';
+
+  const url = `/hls/${nodeName}/stream.m3u8`;
+  if (hls) {
+    hls.loadSource(url);
+  } else {
+    video.src = url;
+  }
+}
+
+function playRecording(nodeName, fromISO, toISO) {
+  if (!nodeName) return;
+  videoPlaceholder.style.display = 'none';
+  video.style.display = 'block';
+  videoStatus.textContent = 'Loading recording...';
+
+  const url = `/hls/${nodeName}/recording.m3u8?from=${encodeURIComponent(fromISO)}&to=${encodeURIComponent(toISO)}`;
+  if (hls) {
+    hls.loadSource(url);
+  } else {
+    video.src = url;
+  }
+}
+
+function stopVideo() {
+  if (hls) {
+    hls.stopLoad();
+  }
+  video.style.display = 'none';
+  videoPlaceholder.style.display = 'flex';
+  videoStatus.textContent = '';
+}
+
+function setVideoMode(mode) {
+  videoMode = mode;
+  document.querySelectorAll('.video-mode-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mode === mode);
+  });
+
+  if (selectedNode && mode === 'live') {
+    playLive(selectedNode);
+  }
+}
+
+// Quick recording playback
+function playRecordingQuick(timeSpec) {
+  if (!selectedNode) return;
+
+  const now = new Date();
+  let from;
+
+  if (timeSpec === '5 mins ago') {
+    from = new Date(now - 5 * 60 * 1000);
+  } else if (timeSpec === '15 mins ago') {
+    from = new Date(now - 15 * 60 * 1000);
+  } else if (timeSpec === 'last hour') {
+    from = new Date(now - 60 * 60 * 1000);
+  } else if (timeSpec === '2 hours ago') {
+    from = new Date(now - 2 * 60 * 60 * 1000);
+  } else if (timeSpec === 'since midnight') {
+    from = new Date(now);
+    from.setHours(0, 0, 0, 0);
+  } else {
+    from = new Date(now - 5 * 60 * 1000);
+  }
+
+  setVideoMode('recording');
+  playRecording(selectedNode, from.toISOString(), now.toISOString());
+}
+
+function playCustomRecording() {
+  const from = document.getElementById('rec-from').value;
+  const to = document.getElementById('rec-to').value;
+  if (selectedNode && from && to) {
+    setVideoMode('recording');
+    playRecording(selectedNode, new Date(from).toISOString(), new Date(to).toISOString());
+  }
 }
 
 function login() {
@@ -609,7 +814,6 @@ function logout() {
 function connectWebSocket() {
   ws = new WebSocket(`ws://${location.host}/ws`);
   ws.onopen = () => {
-    // Send authentication
     if (sessionToken) {
       ws.send(`TOKEN|${sessionToken}`);
     } else if (pendingCredentials) {
@@ -620,7 +824,6 @@ function connectWebSocket() {
   ws.onclose = () => {
     statusDot.classList.remove('connected');
     statusText.textContent = 'Disconnected';
-    // Only auto-reconnect if we have a session token
     if (sessionToken) {
       append('~ Disconnected, reconnecting... ~', 'system');
       setTimeout(connectWebSocket, 3000);
@@ -632,7 +835,6 @@ function connectWebSocket() {
 
 function handleMessage(e) {
   const msg = e.data;
-  // Handle authentication responses first
   if (msg.startsWith('AUTH_OK|')) {
     const parts = msg.split('|');
     const token = parts[1];
@@ -642,10 +844,8 @@ function handleMessage(e) {
       localStorage.setItem('admin_session', token);
     }
     userRole = role;
-    // Hide login overlay, show logout button
     loginOverlay.style.display = 'none';
     logoutBtn.style.display = 'block';
-    // Show admin link only for admins
     if (role === 'admin') {
       adminLink.style.display = 'block';
     }
@@ -655,11 +855,9 @@ function handleMessage(e) {
     ws.send('nodes');
     return;
   } else if (msg === 'AUTH_FAILED') {
-    // Clear invalid session
     localStorage.removeItem('admin_session');
     sessionToken = null;
     userRole = null;
-    // Show login overlay with error
     loginOverlay.style.display = 'flex';
     logoutBtn.style.display = 'none';
     adminLink.style.display = 'none';
@@ -691,7 +889,11 @@ function handleMessage(e) {
   } else if (msg.startsWith('DISCONNECTED|')) {
     const name = msg.split('|')[1];
     connectedNodes.delete(name);
-    if (selectedNode === name) { selectedNode = null; updateControlPanel(); }
+    if (selectedNode === name) {
+      selectedNode = null;
+      updateControlPanel();
+      stopVideo();
+    }
     updateNodeList();
     append(`[DISCONNECTED] ${name}`, 'rejected');
   } else if (msg.startsWith('Connected nodes:')) {
@@ -707,7 +909,6 @@ function parseNodesList(msg) {
   const lines = msg.split('\n');
   connectedNodes.clear();
   for (const line of lines) {
-    // Format: "  nodename - address (fingerprint)"
     const match = line.match(/^\s+(\S+)\s+-\s+/);
     if (match) connectedNodes.set(match[1], { status: 'connected' });
   }
@@ -723,12 +924,16 @@ function sendCommand(cmdStr) {
   }
 }
 
-// Node management
 function selectNode(name) {
   selectedNode = name;
   updateNodeList();
   updateControlPanel();
   sendCommand(`${name} params`);
+
+  // Auto-play live stream when node selected
+  if (videoMode === 'live') {
+    playLive(name);
+  }
 }
 
 function approveNode(name) { sendCommand(`approve ${name}`); }
@@ -749,7 +954,7 @@ function updateNodeList() {
     dot.className = 'node-dot';
 
     const span = document.createElement('span');
-    span.textContent = name;  // Safe: textContent escapes HTML
+    span.textContent = name;
 
     card.appendChild(dot);
     card.appendChild(span);
@@ -773,19 +978,19 @@ function updatePendingList() {
     dot.className = 'node-dot';
 
     const span = document.createElement('span');
-    span.textContent = name;  // Safe: textContent escapes HTML
+    span.textContent = name;
 
     const actions = document.createElement('div');
     actions.className = 'node-actions';
 
     const approveBtn = document.createElement('button');
     approveBtn.className = 'approve';
-    approveBtn.textContent = 'Approve';
+    approveBtn.textContent = 'OK';
     approveBtn.onclick = (e) => { e.stopPropagation(); approveNode(name); };
 
     const rejectBtn = document.createElement('button');
     rejectBtn.className = 'reject';
-    rejectBtn.textContent = 'Reject';
+    rejectBtn.textContent = 'X';
     rejectBtn.onclick = (e) => { e.stopPropagation(); rejectNode(name); };
 
     actions.appendChild(approveBtn);
@@ -810,7 +1015,6 @@ function updateControlPanel() {
   }
 }
 
-// Tabs
 function setupTabs() {
   document.querySelectorAll('.tab').forEach(tab => {
     tab.onclick = () => {
@@ -867,7 +1071,7 @@ function ptzHome() { if (selectedNode) sendCommand(`${selectedNode} home`); }
 function ptzStatus() { if (selectedNode) sendCommand(`${selectedNode} status`); }
 function ptzInfo() { if (selectedNode) sendCommand(`${selectedNode} info`); }
 
-// Recording controls
+// Recording controls (for download)
 function getRecordings(timeSpec) {
   if (selectedNode) sendCommand(`${selectedNode} recordings ${timeSpec}`);
 }

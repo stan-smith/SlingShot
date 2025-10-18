@@ -732,6 +732,13 @@ async fn handle_connection(
             }
         };
 
+        // Register node connection with HLS server for recording playback
+        admin_state.hls_state.add_node_connection(
+            node_name.clone(),
+            Arc::new(connection.clone()),
+            decryption_key.clone(),
+        ).await;
+
         let mut file_receiver = if let Some(key) = decryption_key {
             FileTransferReceiver::with_decryption_key(output_dir.clone(), key)
         } else {
@@ -1025,6 +1032,10 @@ async fn handle_connection(
             let mut onvif = onvif_nodes.lock().await;
             onvif.remove(&node_name);
         }
+
+        // Unregister node connection from HLS server
+        admin_state.hls_state.remove_node_connection(&node_name).await;
+
         println!("Node '{}' removed, relay stopped", node_name);
 
         // Log node disconnected

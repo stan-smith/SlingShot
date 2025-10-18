@@ -10,7 +10,9 @@ use axum::{
 };
 use fingerprint_store::FingerprintStore;
 use futures::{SinkExt, StreamExt};
+use hls_server::HlsState;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -36,6 +38,8 @@ pub struct AdminState {
     pub command_tx: mpsc::Sender<AdminCommand>,
     /// Fingerprint store for authentication
     pub store: Arc<Mutex<FingerprintStore>>,
+    /// HLS server state for video streaming
+    pub hls_state: Arc<HlsState>,
 }
 
 /// Command from admin to daemon
@@ -44,13 +48,25 @@ pub struct AdminCommand {
 }
 
 impl AdminState {
+    /// Create a new AdminState with default HLS configuration
     pub fn new(command_tx: mpsc::Sender<AdminCommand>, store: Arc<Mutex<FingerprintStore>>) -> Self {
+        Self::with_hls_config(command_tx, store, PathBuf::from("/tmp/hls"), 8554)
+    }
+
+    /// Create a new AdminState with custom HLS configuration
+    pub fn with_hls_config(
+        command_tx: mpsc::Sender<AdminCommand>,
+        store: Arc<Mutex<FingerprintStore>>,
+        hls_dir: PathBuf,
+        rtsp_port: u16,
+    ) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
             pending_nodes: Mutex::new(Vec::new()),
             next_session_id: Mutex::new(1),
             command_tx,
             store,
+            hls_state: Arc::new(HlsState::new(hls_dir, rtsp_port)),
         }
     }
 
@@ -108,14 +124,20 @@ pub async fn request_approval(
 
 /// Start the admin web server on the specified address
 pub async fn run_admin_server(addr: &str, state: Arc<AdminState>) -> Result<()> {
+    // Create HLS router with shared HLS state (stateless merge)
+    let hls_router = hls_server::routes::hls_router(state.hls_state.clone());
+
     let app = Router::new()
         .route("/", get(index_handler))
         .route("/admin", get(admin_page_handler))
         .route("/ws", get(ws_handler))
-        .with_state(state);
+        .with_state(state)
+        // HLS streaming routes - merged without state (already has its own)
+        .nest("/hls", hls_router);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("Admin web server listening on http://{}", addr);
+    println!("HLS streaming available at /hls/<node>/stream.m3u8");
 
     axum::serve(listener, app).await?;
     Ok(())

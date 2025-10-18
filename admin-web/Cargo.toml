@@ -9,4 +9,5 @@ tokio = { version = "1", features = ["sync", "time"] }
 futures = "0.3"
 anyhow = "1"
 fingerprint-store = { path = "../fingerprint-store" }
+hls-server = { path = "../hls-server" }
 base64 = "0.22"
