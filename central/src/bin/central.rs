@@ -732,13 +732,6 @@ async fn handle_connection(
             }
         };
 
-        // Register node connection with HLS server for recording playback
-        admin_state.hls_state.add_node_connection(
-            node_name.clone(),
-            Arc::new(connection.clone()),
-            decryption_key.clone(),
-        ).await;
-
         let mut file_receiver = if let Some(key) = decryption_key {
             FileTransferReceiver::with_decryption_key(output_dir.clone(), key)
         } else {
@@ -833,6 +826,7 @@ async fn handle_connection(
                                                             }))
                                                     );
                                                 }
+
                                                 if let Err(e) = file_receiver.start_file(header).await {
                                                     eprintln!("[{}] Failed to start file: {}", node_name, e);
                                                 }
@@ -857,6 +851,7 @@ async fn handle_connection(
                                                     Ok(path) => {
                                                         println!("[{}] Saved: {}", node_name, path.display());
                                                         broadcast(&admin_state, &format!("[{}] Saved: {}", node_name, path.display())).await;
+
                                                         // Send success ACK to remote
                                                         let ack = format!("FILE_ACK|{}|{}|ok", complete.request_id, complete.file_index);
                                                         if let Err(e) = cmd_tx.send(ack).await {
@@ -908,6 +903,7 @@ async fn handle_connection(
                                             Ok(error) => {
                                                 eprintln!("[{}] Transfer error: {}", node_name, error.message);
                                                 broadcast(&admin_state, &format!("[{}] Transfer error: {}", node_name, error.message)).await;
+
                                                 // Log file transfer error
                                                 if let Some(logger) = &audit_logger {
                                                     let _ = logger.lock().await.log(
@@ -1033,8 +1029,8 @@ async fn handle_connection(
             onvif.remove(&node_name);
         }
 
-        // Unregister node connection from HLS server
-        admin_state.hls_state.remove_node_connection(&node_name).await;
+        // Stop HLS stream for this node
+        admin_state.hls_state.remove_node(&node_name).await;
 
         println!("Node '{}' removed, relay stopped", node_name);
 

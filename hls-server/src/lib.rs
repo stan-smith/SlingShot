@@ -4,14 +4,11 @@
 //! video surveillance system. It handles:
 //!
 //! - **Live streaming**: Transcodes RTSP streams to HLS using ffmpeg
-//! - **Recording playback**: Generates HLS playlists from edge node recordings
 //!
 //! # Architecture
 //!
 //! ```text
 //! Browser <--HLS--> hls-server <--RTSP--> central <--QUIC--> edge
-//!                       |                                      |
-//!                       +------------ QUIC (recordings) -------+
 //! ```
 //!
 //! # Usage
@@ -36,22 +33,18 @@
 //! | Endpoint | Description |
 //! |----------|-------------|
 //! | `GET /hls/<node>/stream.m3u8` | Live HLS playlist |
-//! | `GET /hls/<node>/live/<segment>.ts` | Live segment |
-//! | `GET /hls/<node>/recording.m3u8?from=<ISO>&to=<ISO>` | Recording VOD playlist |
-//! | `GET /hls/<node>/recording/<timestamp>.ts` | Recording segment |
+//! | `GET /hls/<node>/segment/<segment>.ts` | Live segment |
 
 pub mod error;
 pub mod live;
 pub mod playlist;
-pub mod recording;
 pub mod routes;
 mod state;
-pub mod transmux;
 
 pub use error::HlsError;
 pub use state::HlsState;
 
 /// Check if all required dependencies (ffmpeg) are available.
 pub async fn check_dependencies() -> Result<(), HlsError> {
-    transmux::check_ffmpeg().await
+    live::check_ffmpeg().await
 }

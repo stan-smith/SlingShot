@@ -1,19 +1,16 @@
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::{header, StatusCode},
     response::IntoResponse,
     routing::get,
     Router,
 };
-use futures::StreamExt;
-use serde::Deserialize;
 use std::sync::Arc;
 use tokio_util::io::ReaderStream;
 
 use crate::error::HlsError;
 use crate::state::HlsState;
-use crate::{recording, transmux};
 
 /// Create the HLS router with all endpoints.
 pub fn hls_router(state: Arc<HlsState>) -> Router {
@@ -21,9 +18,6 @@ pub fn hls_router(state: Arc<HlsState>) -> Router {
         // Live streaming endpoints
         .route("/{node}/stream.m3u8", get(live_playlist_handler))
         .route("/{node}/segment/{segment}", get(live_segment_handler))
-        // Recording playback endpoints
-        .route("/{node}/recording.m3u8", get(recording_playlist_handler))
-        .route("/{node}/recording/{segment}", get(recording_segment_handler))
         .with_state(state)
 }
 
@@ -75,7 +69,7 @@ async fn live_segment_handler(
     let segment_path = state.hls_dir.join(&node).join(&segment);
 
     if !segment_path.exists() {
-        return Err(HlsError::RecordingNotFound(format!("Segment not found: {}", segment)).into());
+        return Err(HlsError::SegmentNotFound(format!("Segment not found: {}", segment)).into());
     }
 
     let file = tokio::fs::File::open(&segment_path)
@@ -85,64 +79,6 @@ async fn live_segment_handler(
     let stream = ReaderStream::new(file);
 
     Ok(([(header::CONTENT_TYPE, "video/mp2t")], Body::from_stream(stream)))
-}
-
-#[derive(Deserialize)]
-pub struct RecordingQuery {
-    pub from: String,
-    pub to: String,
-}
-
-/// Generate and serve a VOD playlist for recordings in a time range.
-async fn recording_playlist_handler(
-    Path(node): Path<String>,
-    Query(query): Query<RecordingQuery>,
-    State(state): State<Arc<HlsState>>,
-) -> Result<impl IntoResponse, HlsErrorResponse> {
-    // Parse time range
-    let time_range = recording::parse_time_range(&query.from, &query.to)?;
-
-    // Get recording list from edge node
-    let recordings = state.fetch_recording_list(&node, &time_range).await?;
-
-    if recordings.is_empty() {
-        return Err(HlsError::RecordingNotFound(format!(
-            "No recordings found for {} in range {} to {}",
-            node, query.from, query.to
-        ))
-        .into());
-    }
-
-    // Generate playlist
-    let playlist = crate::playlist::recording_playlist(&node, &recordings);
-
-    Ok((
-        [(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")],
-        playlist,
-    ))
-}
-
-/// Fetch, decrypt, and transmux a recording segment.
-async fn recording_segment_handler(
-    Path((node, segment)): Path<(String, String)>,
-    State(state): State<Arc<HlsState>>,
-) -> Result<impl IntoResponse, HlsErrorResponse> {
-    // Extract timestamp from segment name (e.g., "2024-12-01_15-30-00.ts" -> "2024-12-01_15-30-00")
-    let timestamp = segment.strip_suffix(".ts").unwrap_or(&segment);
-
-    // Fetch the MP4 from edge node (handles decryption)
-    let mp4_data = state.fetch_recording_segment(&node, timestamp).await?;
-
-    // Transmux MP4 to TS
-    let ts_stream = transmux::transmux_mp4_to_ts(mp4_data).await?;
-
-    // Map the stream to convert io::Error to Infallible for axum
-    let mapped_stream = ts_stream.map(|result| result.map_err(|e| std::io::Error::other(e)));
-
-    Ok((
-        [(header::CONTENT_TYPE, "video/mp2t")],
-        Body::from_stream(mapped_stream),
-    ))
 }
 
 /// Error response wrapper for HlsError
@@ -160,12 +96,8 @@ impl IntoResponse for HlsErrorResponse {
             HlsError::NodeNotFound(_) | HlsError::NodeNotConnected(_) => {
                 (StatusCode::NOT_FOUND, self.0.to_string())
             }
-            HlsError::RecordingNotFound(_) => (StatusCode::NOT_FOUND, self.0.to_string()),
+            HlsError::SegmentNotFound(_) => (StatusCode::NOT_FOUND, self.0.to_string()),
             HlsError::StreamNotRunning(_) => (StatusCode::SERVICE_UNAVAILABLE, self.0.to_string()),
-            HlsError::InvalidTimeRange(_) => (StatusCode::BAD_REQUEST, self.0.to_string()),
-            HlsError::DecryptionFailed(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Decryption failed".to_string())
-            }
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string()),
         };
 

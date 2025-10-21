@@ -4,6 +4,20 @@ use tokio::process::{Child, Command};
 
 use crate::error::HlsError;
 
+/// Check if ffmpeg is available.
+pub async fn check_ffmpeg() -> Result<(), HlsError> {
+    let output = Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .await
+        .map_err(|e| HlsError::Ffmpeg(format!("ffmpeg not found: {}", e)))?;
+
+    if !output.status.success() {
+        return Err(HlsError::Ffmpeg("ffmpeg not available".to_string()));
+    }
+    Ok(())
+}
+
 /// Manages a live RTSP-to-HLS transcoding session for a single node.
 ///
 /// Uses ffmpeg to pull from the RTSP server and output HLS segments.

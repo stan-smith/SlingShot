@@ -172,6 +172,28 @@ body {
 .node-card.pending .node-dot { background: var(--accent-yellow); }
 .node-actions { margin-left: auto; display: flex; gap: 4px; }
 .no-items { color: var(--text-muted); font-size: 11px; padding: 8px; }
+/* Node search */
+.node-search {
+  margin-bottom: 12px;
+}
+.node-search input {
+  width: 100%;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 11px;
+  border-radius: 3px;
+}
+.node-search input:focus {
+  outline: none;
+  border-color: var(--text-primary);
+}
+.node-search input::placeholder {
+  color: var(--text-muted);
+}
+.node-name .match { color: var(--accent-yellow); }
 /* Buttons */
 button {
   background: var(--bg-tertiary);
@@ -471,6 +493,9 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
   </header>
 
   <aside class="nodes-panel">
+    <div class="node-search">
+      <input type="text" id="node-search" placeholder="Search nodes..." oninput="filterNodes()">
+    </div>
     <div class="section-header">Connected Nodes</div>
     <div id="connected-nodes"><div class="no-items">No nodes connected</div></div>
     <div class="section-header" style="margin-top:16px">Pending Approval</div>
@@ -483,8 +508,6 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
       <div id="video-placeholder">Select a node to view stream</div>
     </div>
     <div class="video-controls">
-      <button class="video-mode-btn active" data-mode="live" onclick="setVideoMode('live')">Live</button>
-      <button class="video-mode-btn" data-mode="recording" onclick="setVideoMode('recording')">Recording</button>
       <span id="video-status"></span>
     </div>
   </main>
@@ -578,13 +601,13 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
       <!-- Recording Tab -->
       <div id="tab-recording" class="tab-content">
         <div class="control-section">
-          <h3>Quick Play</h3>
+          <h3>Quick Download</h3>
           <div class="quick-buttons">
-            <button onclick="playRecordingQuick('5 mins ago')">5m</button>
-            <button onclick="playRecordingQuick('15 mins ago')">15m</button>
-            <button onclick="playRecordingQuick('last hour')">1h</button>
-            <button onclick="playRecordingQuick('2 hours ago')">2h</button>
-            <button onclick="playRecordingQuick('since midnight')">Today</button>
+            <button onclick="downloadRecordingsQuick('5 mins ago')">5m</button>
+            <button onclick="downloadRecordingsQuick('15 mins ago')">15m</button>
+            <button onclick="downloadRecordingsQuick('last hour')">1h</button>
+            <button onclick="downloadRecordingsQuick('2 hours ago')">2h</button>
+            <button onclick="downloadRecordingsQuick('since midnight')">Today</button>
           </div>
         </div>
         <div class="control-section">
@@ -600,7 +623,6 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
             </div>
           </div>
           <div class="recording-actions">
-            <button class="play-btn" onclick="playCustomRecording()">Play</button>
             <button onclick="getCustomRecordings()">Download</button>
           </div>
         </div>
@@ -639,7 +661,87 @@ let pendingNodes = new Map();
 let commandHistory = [];
 let historyIndex = -1;
 let ptzContinuous = false;
-let videoMode = 'live';
+let nodeSearchQuery = '';
+
+// Fuzzy search function - returns score (higher = better match), -1 if no match
+function fuzzyMatch(pattern, str) {
+  pattern = pattern.toLowerCase();
+  str = str.toLowerCase();
+
+  if (pattern.length === 0) return { score: 1, matches: [] };
+  if (pattern.length > str.length) return { score: -1, matches: [] };
+
+  // Exact substring match gets highest score
+  const exactIdx = str.indexOf(pattern);
+  if (exactIdx !== -1) {
+    const matches = [];
+    for (let i = 0; i < pattern.length; i++) {
+      matches.push(exactIdx + i);
+    }
+    return { score: 100 + (str.length - pattern.length), matches };
+  }
+
+  // Fuzzy match - characters must appear in order
+  let patternIdx = 0;
+  let score = 0;
+  let lastMatchIdx = -1;
+  const matches = [];
+
+  for (let i = 0; i < str.length && patternIdx < pattern.length; i++) {
+    if (str[i] === pattern[patternIdx]) {
+      matches.push(i);
+      // Bonus for consecutive matches
+      if (lastMatchIdx === i - 1) {
+        score += 10;
+      }
+      // Bonus for matching at start or after separator
+      if (i === 0 || str[i-1] === '-' || str[i-1] === '_' || str[i-1] === ' ') {
+        score += 5;
+      }
+      score += 1;
+      lastMatchIdx = i;
+      patternIdx++;
+    }
+  }
+
+  // All pattern characters must be found
+  if (patternIdx !== pattern.length) {
+    return { score: -1, matches: [] };
+  }
+
+  return { score, matches };
+}
+
+function filterNodes() {
+  nodeSearchQuery = document.getElementById('node-search').value;
+  updateNodeList();
+  updatePendingList();
+}
+
+function highlightMatches(name, matches) {
+  if (matches.length === 0) return document.createTextNode(name);
+
+  const span = document.createElement('span');
+  span.className = 'node-name';
+  let lastIdx = 0;
+
+  for (const matchIdx of matches) {
+    if (matchIdx > lastIdx) {
+      span.appendChild(document.createTextNode(name.slice(lastIdx, matchIdx)));
+    }
+    const highlight = document.createElement('span');
+    highlight.className = 'match';
+    highlight.textContent = name[matchIdx];
+    span.appendChild(highlight);
+    lastIdx = matchIdx + 1;
+  }
+
+  if (lastIdx < name.length) {
+    span.appendChild(document.createTextNode(name.slice(lastIdx)));
+  }
+
+  return span;
+}
 
 // Authentication state
 let sessionToken = localStorage.getItem('admin_session');
@@ -718,20 +820,6 @@ function playLive(nodeName) {
   }
 }
 
-function playRecording(nodeName, fromISO, toISO) {
-  if (!nodeName) return;
-  videoPlaceholder.style.display = 'none';
-  video.style.display = 'block';
-  videoStatus.textContent = 'Loading recording...';
-
-  const url = `/hls/${nodeName}/recording.m3u8?from=${encodeURIComponent(fromISO)}&to=${encodeURIComponent(toISO)}`;
-  if (hls) {
-    hls.loadSource(url);
-  } else {
-    video.src = url;
-  }
-}
-
 function stopVideo() {
   if (hls) {
     hls.stopLoad();
@@ -741,19 +829,8 @@ function stopVideo() {
   videoStatus.textContent = '';
 }
 
-function setVideoMode(mode) {
-  videoMode = mode;
-  document.querySelectorAll('.video-mode-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.mode === mode);
-  });
-
-  if (selectedNode && mode === 'live') {
-    playLive(selectedNode);
-  }
-}
-
-// Quick recording playback
-function playRecordingQuick(timeSpec) {
+// Quick recording download
+function downloadRecordingsQuick(timeSpec) {
   if (!selectedNode) return;
 
   const now = new Date();
@@ -774,17 +851,8 @@ function playRecordingQuick(timeSpec) {
     from = new Date(now - 5 * 60 * 1000);
   }
 
-  setVideoMode('recording');
-  playRecording(selectedNode, from.toISOString(), now.toISOString());
-}
-
-function playCustomRecording() {
-  const from = document.getElementById('rec-from').value;
-  const to = document.getElementById('rec-to').value;
-  if (selectedNode && from && to) {
-    setVideoMode('recording');
-    playRecording(selectedNode, new Date(from).toISOString(), new Date(to).toISOString());
-  }
+  // Send command to trigger download
+  sendCommand(`${selectedNode} recordings ${from.toISOString()} ${now.toISOString()}`);
 }
 
 function login() {
@@ -931,9 +999,7 @@ function selectNode(name) {
   sendCommand(`${name} params`);
 
   // Auto-play live stream when node selected
-  if (videoMode === 'live') {
-    playLive(name);
-  }
+  playLive(name);
 }
 
 function approveNode(name) { sendCommand(`approve ${name}`); }
@@ -945,19 +1011,34 @@ function updateNodeList() {
     container.innerHTML = '<div class="no-items">No nodes connected</div>';
     return;
   }
-  container.innerHTML = '';
+
+  // Filter and sort nodes by fuzzy match score
+  const filteredNodes = [];
   connectedNodes.forEach((info, name) => {
+    const result = fuzzyMatch(nodeSearchQuery, name);
+    if (result.score >= 0) {
+      filteredNodes.push({ name, info, score: result.score, matches: result.matches });
+    }
+  });
+
+  // Sort by score descending
+  filteredNodes.sort((a, b) => b.score - a.score);
+
+  container.innerHTML = '';
+  if (filteredNodes.length === 0) {
+    container.innerHTML = '<div class="no-items">No matching nodes</div>';
+    return;
+  }
+
+  filteredNodes.forEach(({ name, matches }) => {
     const card = document.createElement('div');
     card.className = 'node-card' + (selectedNode === name ? ' selected' : '');
 
     const dot = document.createElement('div');
     dot.className = 'node-dot';
 
-    const span = document.createElement('span');
-    span.textContent = name;
-
     card.appendChild(dot);
-    card.appendChild(span);
+    card.appendChild(highlightMatches(name, matches));
     card.onclick = () => selectNode(name);
     container.appendChild(card);
   });
@@ -969,16 +1050,31 @@ function updatePendingList() {
     container.innerHTML = '<div class="no-items">No pending nodes</div>';
     return;
   }
-  container.innerHTML = '';
+
+  // Filter and sort pending nodes by fuzzy match score
+  const filteredNodes = [];
   pendingNodes.forEach((info, name) => {
+    const result = fuzzyMatch(nodeSearchQuery, name);
+    if (result.score >= 0) {
+      filteredNodes.push({ name, info, score: result.score, matches: result.matches });
+    }
+  });
+
+  // Sort by score descending
+  filteredNodes.sort((a, b) => b.score - a.score);
+
+  container.innerHTML = '';
+  if (filteredNodes.length === 0) {
+    container.innerHTML = '<div class="no-items">No matching pending nodes</div>';
+    return;
+  }
+
+  filteredNodes.forEach(({ name, matches }) => {
     const card = document.createElement('div');
     card.className = 'node-card pending';
 
     const dot = document.createElement('div');
     dot.className = 'node-dot';
-
-    const span = document.createElement('span');
-    span.textContent = name;
 
     const actions = document.createElement('div');
     actions.className = 'node-actions';
@@ -997,7 +1093,7 @@ function updatePendingList() {
     actions.appendChild(rejectBtn);
 
     card.appendChild(dot);
-    card.appendChild(span);
+    card.appendChild(highlightMatches(name, matches));
     card.appendChild(actions);
     container.appendChild(card);
   });
