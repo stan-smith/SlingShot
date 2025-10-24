@@ -1,6 +1,8 @@
 use anyhow::Result;
+use chrono::SecondsFormat;
 use axum::{
     extract::{
+        connect_info::ConnectInfo,
         ws::{Message, WebSocket},
         State, WebSocketUpgrade,
     },
@@ -12,9 +14,10 @@ use fingerprint_store::FingerprintStore;
 use futures::{SinkExt, StreamExt};
 use hls_server::HlsState;
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// Pending node awaiting admin approval
@@ -24,6 +27,12 @@ pub struct PendingNode {
     pub rtsp_url: String,
     pub address: String,
     pub approve_tx: oneshot::Sender<bool>,
+}
+
+/// Rate limit tracking entry for IP-based authentication throttling
+pub struct RateLimitEntry {
+    pub failed_attempts: u32,
+    pub last_attempt: Instant,
 }
 
 /// Shared admin state
@@ -40,6 +49,8 @@ pub struct AdminState {
     pub store: Arc<Mutex<FingerprintStore>>,
     /// HLS server state for video streaming
     pub hls_state: Arc<HlsState>,
+    /// IP-based rate limiting for authentication
+    pub rate_limits: Mutex<HashMap<IpAddr, RateLimitEntry>>,
 }
 
 /// Command from admin to daemon
@@ -67,6 +78,7 @@ impl AdminState {
             command_tx,
             store,
             hls_state: Arc::new(HlsState::new(hls_dir, rtsp_port)),
+            rate_limits: Mutex::new(HashMap::new()),
         }
     }
 
@@ -139,7 +151,8 @@ pub async fn run_admin_server(addr: &str, state: Arc<AdminState>) -> Result<()> 
     println!("Admin web server listening on http://{}", addr);
     println!("HLS streaming available at /hls/<node>/stream.m3u8");
 
-    axum::serve(listener, app).await?;
+    // Use into_make_service_with_connect_info to extract client IP for rate limiting
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
 }
 
@@ -153,13 +166,44 @@ async fn admin_page_handler() -> impl IntoResponse {
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AdminState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    let client_ip = addr.ip();
+    ws.on_upgrade(move |socket| handle_socket(socket, state, client_ip))
 }
 
-async fn handle_socket(socket: WebSocket, state: Arc<AdminState>) {
+async fn handle_socket(socket: WebSocket, state: Arc<AdminState>, client_ip: IpAddr) {
     let (mut ws_tx, mut ws_rx) = socket.split();
+
+    // ~ Rate Limit Check ~
+    // Check if this IP is rate limited before allowing auth attempt
+    {
+        let mut rate_limits = state.rate_limits.lock().await;
+
+        // Clean up stale entries (older than 15 minutes)
+        let cutoff = Instant::now() - Duration::from_secs(15 * 60);
+        rate_limits.retain(|_, entry| entry.last_attempt > cutoff);
+
+        // Check if IP is locked out
+        if let Some(entry) = rate_limits.get(&client_ip) {
+            // Lockout after 4+ failures for 5 minutes
+            if entry.failed_attempts >= 4 {
+                let lockout_end = entry.last_attempt + Duration::from_secs(5 * 60);
+                if Instant::now() < lockout_end {
+                    let remaining = lockout_end.duration_since(Instant::now()).as_secs();
+                    println!(
+                        "Rate limit: {} is locked out ({} failures), {} seconds remaining",
+                        client_ip, entry.failed_attempts, remaining
+                    );
+                    let _ = ws_tx
+                        .send(Message::Text(format!("RATE_LIMITED|{}", remaining).into()))
+                        .await;
+                    return;
+                }
+            }
+        }
+    }
 
     // ~ Authentication Phase ~
     // Wait for TOTP or TOKEN message (timeout 30s)
@@ -206,10 +250,41 @@ async fn handle_socket(socket: WebSocket, state: Arc<AdminState>) {
     };
 
     if !authenticated {
-        // Rate limit: 1 second delay on failed auth to prevent brute force
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Update rate limit tracking with exponential backoff
+        let delay_secs = {
+            let mut rate_limits = state.rate_limits.lock().await;
+            let entry = rate_limits.entry(client_ip).or_insert(RateLimitEntry {
+                failed_attempts: 0,
+                last_attempt: Instant::now(),
+            });
+            entry.failed_attempts += 1;
+            entry.last_attempt = Instant::now();
+
+            // Exponential backoff: 1s, 2s, 4s, 8s (capped)
+            let delay = match entry.failed_attempts {
+                1 => 1,
+                2 => 2,
+                3 => 4,
+                _ => 8,
+            };
+
+            println!(
+                "Rate limit: {} failed {} time(s), delay {}s",
+                client_ip, entry.failed_attempts, delay
+            );
+
+            delay
+        };
+
+        tokio::time::sleep(Duration::from_secs(delay_secs)).await;
         let _ = ws_tx.send(Message::Text("AUTH_FAILED".into())).await;
         return;
+    }
+
+    // Clear rate limit on successful auth
+    {
+        let mut rate_limits = state.rate_limits.lock().await;
+        rate_limits.remove(&client_ip);
     }
 
     // Send auth success with token and role
@@ -320,6 +395,61 @@ async fn handle_socket(socket: WebSocket, state: Arc<AdminState>) {
                         }
                     }
                 }
+                "approved" => {
+                    let store = state_clone.store.lock().await;
+                    match store.list_approved() {
+                        Ok(nodes) => {
+                            let json: Vec<_> = nodes.iter().map(|n| {
+                                format!(
+                                    r#"{{"fingerprint":"{}","node_name":"{}","first_seen":"{}","last_seen":"{}","approved_by":"{}"}}"#,
+                                    n.fingerprint,
+                                    n.node_name,
+                                    n.first_seen.to_rfc3339_opts(SecondsFormat::Secs, true),
+                                    n.last_seen.to_rfc3339_opts(SecondsFormat::Secs, true),
+                                    n.approved_by.as_deref().unwrap_or("")
+                                )
+                            }).collect();
+                            let msg = format!("APPROVED_NODES|[{}]", json.join(","));
+                            if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                let _ = tx.send(msg).await;
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                let _ = tx.send(format!("ERROR|{}", e)).await;
+                            }
+                        }
+                    }
+                }
+                "revoke" if parts.len() >= 2 => {
+                    if !is_admin {
+                        if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                            let _ = tx.send("ERROR|Permission denied (admin only)".to_string()).await;
+                        }
+                        continue;
+                    }
+                    let fingerprint = parts[1];
+                    let store = state_clone.store.lock().await;
+                    match store.revoke(fingerprint) {
+                        Ok(true) => {
+                            broadcast(&state_clone, &format!("REVOKED|{}", fingerprint)).await;
+                            // Also disconnect the node if it's currently connected
+                            drop(store); // Release lock before sending command
+                            let cmd = AdminCommand { raw_line: format!("disconnect_by_fp {}", fingerprint) };
+                            let _ = state_clone.command_tx.send(cmd).await;
+                        }
+                        Ok(false) => {
+                            if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                let _ = tx.send("ERROR|Node not found".to_string()).await;
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                                let _ = tx.send(format!("ERROR|{}", e)).await;
+                            }
+                        }
+                    }
+                }
                 "help" => {
                     let help_lines = [
                         "~ Admin Commands ~",
@@ -327,6 +457,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AdminState>) {
                         "  pending               - List nodes awaiting approval",
                         "  approve <name>        - Approve pending node",
                         "  reject <name>         - Reject pending node",
+                        "  approved              - List all approved nodes",
+                        "  revoke <fingerprint>  - Revoke node approval (admin)",
                         "",
                         "~ Node Commands ~",
                         "  <node> params         - Show current stream parameters",

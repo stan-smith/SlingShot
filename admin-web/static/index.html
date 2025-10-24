@@ -167,9 +167,34 @@ body {
 .node-dot {
   width: 8px; height: 8px; border-radius: 50%;
   margin-right: 8px;
+  flex-shrink: 0;
+}
+.node-dot.online {
   background: var(--text-primary);
+  box-shadow: 0 0 6px var(--text-primary);
+}
+.node-dot.offline {
+  background: var(--accent-red);
 }
 .node-card.pending .node-dot { background: var(--accent-yellow); }
+.node-card.offline {
+  opacity: 0.6;
+  cursor: default;
+}
+.node-card.offline:hover { background: transparent; }
+.revoke-btn {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  color: var(--accent-red);
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 12px;
+  opacity: 0.5;
+}
+.revoke-btn:hover {
+  opacity: 1;
+}
 .node-actions { margin-left: auto; display: flex; gap: 4px; }
 .no-items { color: var(--text-muted); font-size: 11px; padding: 8px; }
 /* Node search */
@@ -496,8 +521,8 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
     <div class="node-search">
       <input type="text" id="node-search" placeholder="Search nodes..." oninput="filterNodes()">
     </div>
-    <div class="section-header">Connected Nodes</div>
-    <div id="connected-nodes"><div class="no-items">No nodes connected</div></div>
+    <div class="section-header">Nodes</div>
+    <div id="nodes-list"><div class="no-items">No nodes</div></div>
     <div class="section-header" style="margin-top:16px">Pending Approval</div>
     <div id="pending-nodes"><div class="no-items">No pending nodes</div></div>
   </aside>
@@ -656,7 +681,8 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
 // State
 let ws = null;
 let selectedNode = null;
-let connectedNodes = new Map();
+let approvedNodes = new Map();  // All approved nodes from database
+let connectedNodes = new Set(); // Names of currently connected nodes
 let pendingNodes = new Map();
 let commandHistory = [];
 let historyIndex = -1;
@@ -921,6 +947,7 @@ function handleMessage(e) {
     statusText.textContent = 'Connected';
     append('~ Authenticated as ' + role + ' ~', 'system');
     ws.send('nodes');
+    ws.send('approved');
     return;
   } else if (msg === 'AUTH_FAILED') {
     localStorage.removeItem('admin_session');
@@ -942,16 +969,53 @@ function handleMessage(e) {
   } else if (msg.startsWith('APPROVED|')) {
     const name = msg.split('|')[1];
     pendingNodes.delete(name);
+    connectedNodes.add(name);  // Node is now connected after approval
     updatePendingList();
+    updateNodeList();
+    ws.send('approved');  // Refresh approved nodes list
     append(`[APPROVED] ${name}`, 'approved');
   } else if (msg.startsWith('REJECTED|')) {
     const name = msg.split('|')[1];
     pendingNodes.delete(name);
     updatePendingList();
     append(`[REJECTED] ${name}`, 'rejected');
+  } else if (msg.startsWith('APPROVED_NODES|')) {
+    const json = msg.substring(15);
+    try {
+      const nodes = JSON.parse(json);
+      approvedNodes.clear();
+      nodes.forEach(n => {
+        approvedNodes.set(n.node_name, {
+          fingerprint: n.fingerprint,
+          firstSeen: n.first_seen,
+          lastSeen: n.last_seen,
+          approvedBy: n.approved_by
+        });
+      });
+      updateNodeList();
+    } catch (e) {
+      append('Error parsing approved nodes: ' + e, 'error');
+    }
+  } else if (msg.startsWith('REVOKED|')) {
+    const fp = msg.split('|')[1];
+    // Remove by fingerprint
+    for (const [name, info] of approvedNodes) {
+      if (info.fingerprint === fp) {
+        approvedNodes.delete(name);
+        connectedNodes.delete(name);
+        if (selectedNode === name) {
+          selectedNode = null;
+          updateControlPanel();
+          stopVideo();
+        }
+        append(`[REVOKED] ${name}`, 'rejected');
+        break;
+      }
+    }
+    updateNodeList();
   } else if (msg.startsWith('CONNECTED|')) {
     const name = msg.split('|')[1];
-    connectedNodes.set(name, { status: 'connected' });
+    connectedNodes.add(name);
     updateNodeList();
     append(`[CONNECTED] ${name}`, 'approved');
   } else if (msg.startsWith('DISCONNECTED|')) {
@@ -978,7 +1042,7 @@ function parseNodesList(msg) {
   connectedNodes.clear();
   for (const line of lines) {
     const match = line.match(/^\s+(\S+)\s+-\s+/);
-    if (match) connectedNodes.set(match[1], { status: 'connected' });
+    if (match) connectedNodes.add(match[1]);
   }
   updateNodeList();
 }
@@ -1006,23 +1070,27 @@ function approveNode(name) { sendCommand(`approve ${name}`); }
 function rejectNode(name) { sendCommand(`reject ${name}`); }
 
 function updateNodeList() {
-  const container = document.getElementById('connected-nodes');
-  if (connectedNodes.size === 0) {
-    container.innerHTML = '<div class="no-items">No nodes connected</div>';
+  const container = document.getElementById('nodes-list');
+  if (approvedNodes.size === 0) {
+    container.innerHTML = '<div class="no-items">No nodes</div>';
     return;
   }
 
   // Filter and sort nodes by fuzzy match score
   const filteredNodes = [];
-  connectedNodes.forEach((info, name) => {
+  approvedNodes.forEach((info, name) => {
     const result = fuzzyMatch(nodeSearchQuery, name);
     if (result.score >= 0) {
-      filteredNodes.push({ name, info, score: result.score, matches: result.matches });
+      const isConnected = connectedNodes.has(name);
+      filteredNodes.push({ name, info, score: result.score, matches: result.matches, isConnected });
     }
   });
 
-  // Sort by score descending
-  filteredNodes.sort((a, b) => b.score - a.score);
+  // Sort: connected first, then by score descending
+  filteredNodes.sort((a, b) => {
+    if (a.isConnected !== b.isConnected) return b.isConnected - a.isConnected;
+    return b.score - a.score;
+  });
 
   container.innerHTML = '';
   if (filteredNodes.length === 0) {
@@ -1030,18 +1098,47 @@ function updateNodeList() {
     return;
   }
 
-  filteredNodes.forEach(({ name, matches }) => {
+  filteredNodes.forEach(({ name, info, matches, isConnected }) => {
     const card = document.createElement('div');
     card.className = 'node-card' + (selectedNode === name ? ' selected' : '');
 
     const dot = document.createElement('div');
-    dot.className = 'node-dot';
+    dot.className = 'node-dot' + (isConnected ? ' online' : ' offline');
+
+    const nameSpan = highlightMatches(name, matches);
 
     card.appendChild(dot);
-    card.appendChild(highlightMatches(name, matches));
-    card.onclick = () => selectNode(name);
+    card.appendChild(nameSpan);
+
+    // Revoke button for admins
+    if (userRole === 'admin') {
+      const revokeBtn = document.createElement('button');
+      revokeBtn.className = 'revoke-btn';
+      revokeBtn.textContent = '✕';
+      revokeBtn.title = 'Revoke approval';
+      revokeBtn.onclick = (e) => {
+        e.stopPropagation();
+        revokeNode(info.fingerprint, name);
+      };
+      card.appendChild(revokeBtn);
+    }
+
+    card.onclick = () => {
+      if (isConnected) {
+        selectNode(name);
+      }
+    };
+    if (!isConnected) {
+      card.classList.add('offline');
+    }
     container.appendChild(card);
   });
+}
+
+function revokeNode(fingerprint, name) {
+  if (confirm(`Revoke "${name}"? It will be disconnected and require re-approval.`)) {
+    sendCommand(`revoke ${fingerprint}`);
+  }
 }
 
 function updatePendingList() {

@@ -18,6 +18,7 @@ use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use sysinfo::System;
 use tokio::sync::mpsc;
 
 /// Central Node - RTSP Stream Controller
@@ -29,6 +30,19 @@ struct RemoteNode {
     address: SocketAddr,
     fingerprint: String,
     cmd_tx: mpsc::Sender<String>,
+    shutdown_tx: mpsc::Sender<()>,
+}
+
+/// Validate a node name for security.
+/// Node names must be 1-32 chars, alphanumeric plus dash/underscore, start with alphanumeric.
+fn is_valid_node_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 32 {
+        return false;
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return false;
+    }
+    name.chars().next().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false)
 }
 
 fn main() -> Result<()> {
@@ -287,6 +301,30 @@ async fn async_main() -> Result<()> {
         }
     });
 
+    // Spawn memory usage monitor (warn at 90% usage)
+    tokio::spawn(async {
+        let mut sys = System::new_all();
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+
+        loop {
+            interval.tick().await;
+            sys.refresh_memory();
+
+            let used = sys.used_memory();
+            let total = sys.total_memory();
+            let percent = (used as f64 / total as f64) * 100.0;
+
+            if percent > 90.0 {
+                println!(
+                    "WARNING: Memory usage at {:.1}% ({}/{} MB)",
+                    percent,
+                    used / 1024 / 1024,
+                    total / 1024 / 1024
+                );
+            }
+        }
+    });
+
     // Setup signal handlers for graceful shutdown
     let mut sigint = tokio::signal::unix::signal(
         tokio::signal::unix::SignalKind::interrupt()
@@ -358,6 +396,28 @@ async fn process_command(
                 Some(response)
             }
         }
+        "disconnect" if parts.len() >= 2 => {
+            let target = parts[1];
+            let nodes = nodes.lock().await;
+            if let Some(node) = nodes.get(target) {
+                let _ = node.shutdown_tx.send(()).await;
+                Some(format!("Disconnecting {}", target))
+            } else {
+                Some(format!("Node '{}' not connected", target))
+            }
+        }
+        "disconnect_by_fp" if parts.len() >= 2 => {
+            // Used by revoke command to disconnect by fingerprint
+            let fp = parts[1];
+            let nodes = nodes.lock().await;
+            for (name, node) in nodes.iter() {
+                if node.fingerprint == fp {
+                    let _ = node.shutdown_tx.send(()).await;
+                    return Some(format!("Disconnecting {} (revoked)", name));
+                }
+            }
+            None // Not connected, that's fine
+        }
         node_name => {
             if parts.len() < 2 {
                 return Some("Usage: <node> <command> [args...]".to_string());
@@ -424,6 +484,12 @@ async fn handle_connection(
     let fingerprint = parts[2].to_string();
     let video_mode = parts[3] == "VIDEO";
     let encryption_requested = parts.get(4).map(|&s| s == "ENCRYPT").unwrap_or(false);
+
+    // Validate node name to prevent path traversal and injection attacks
+    if !is_valid_node_name(&node_name) {
+        println!("Rejected invalid node name from {}: {:?}", remote, node_name);
+        return Ok(());
+    }
 
     println!("~ AUTHENTICATION REQUEST ~");
     println!("  Node: {}", node_name);
@@ -667,6 +733,8 @@ async fn handle_connection(
 
         // Create command channel for this node
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<String>(100);
+        // Create shutdown channel for admin disconnect
+        let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
         // Store node in main registry
         {
@@ -677,6 +745,7 @@ async fn handle_connection(
                     address: remote,
                     fingerprint: fingerprint.clone(),
                     cmd_tx: cmd_tx.clone(),
+                    shutdown_tx,
                 },
             );
         }
@@ -749,6 +818,12 @@ async fn handle_connection(
         let mut stats_interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             tokio::select! {
+                // Handle admin disconnect request
+                _ = shutdown_rx.recv() => {
+                    println!("[{}] Disconnect requested by admin", node_name);
+                    break;
+                }
+
                 // Log QUIC connection stats and QoS metrics (debug only)
                 _ = stats_interval.tick() => {
                     if debug {
