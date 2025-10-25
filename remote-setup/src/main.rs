@@ -27,9 +27,6 @@ struct Cli {
     #[arg(long)]
     status: bool,
 
-    /// Test connection to central node
-    #[arg(long)]
-    test: bool,
 }
 
 fn main() -> Result<()> {
@@ -47,9 +44,6 @@ fn main() -> Result<()> {
     }
     if cli.status {
         return show_status();
-    }
-    if cli.test {
-        return test_connection();
     }
 
     // No flags - show interactive menu
@@ -79,7 +73,6 @@ fn run_menu() -> Result<()> {
             "Install/update systemd service",
             "Uninstall systemd service",
             "Show current configuration",
-            "Test connection to central",
             "Exit",
         ];
 
@@ -115,13 +108,6 @@ fn run_menu() -> Result<()> {
                 }
             }
             4 => {
-                if !has_config {
-                    println!("Error: No configuration found. Please configure first.");
-                } else if let Err(e) = test_connection() {
-                    eprintln!("Connection test failed: {}", e);
-                }
-            }
-            5 => {
                 println!("Goodbye!");
                 break;
             }
@@ -177,51 +163,3 @@ fn show_status() -> Result<()> {
     Ok(())
 }
 
-fn test_connection() -> Result<()> {
-    let config = RemoteConfig::load()?;
-
-    println!("Testing connection to central node at {}...", config.central_address);
-
-    // For now just validate the address format
-    use std::net::SocketAddr;
-    match config.central_address.parse::<SocketAddr>() {
-        Ok(addr) => {
-            println!("Address format: valid ({})", addr);
-
-            // Try a TCP connection to check reachability
-            println!("Checking reachability...");
-            match std::net::TcpStream::connect_timeout(
-                &addr,
-                std::time::Duration::from_secs(5),
-            ) {
-                Ok(_) => println!("Connection: reachable"),
-                Err(e) => println!("Connection: failed ({})", e),
-            }
-        }
-        Err(e) => {
-            println!("Address format: invalid ({})", e);
-        }
-    }
-
-    // Test camera connection if ONVIF
-    match &config.source {
-        config_manager::SourceConfig::Onvif(onvif) => {
-            println!();
-            println!("Testing camera connection at {}...", onvif.ip);
-
-            let pass = onvif.password().map_err(|e| anyhow::anyhow!("Failed to decode password: {}", e))?;
-            let client = onvif_client::OnvifClient::new(&onvif.ip, &onvif.username, &pass);
-
-            match client.get_device_info() {
-                Ok(info) => println!("Camera: {}", info),
-                Err(e) => println!("Camera connection failed: {}", e),
-            }
-        }
-        config_manager::SourceConfig::Rtsp(_) => {
-            println!();
-            println!("RTSP source - skipping camera test");
-        }
-    }
-
-    Ok(())
-}

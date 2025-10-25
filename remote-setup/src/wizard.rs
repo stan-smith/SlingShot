@@ -16,10 +16,22 @@ pub fn run_wizard() -> Result<()> {
     // Load existing config if available for defaults
     let existing = RemoteConfig::load().ok();
 
-    // Node name
+    // Node name (with validation)
     let node_name: String = Input::with_theme(&ColorfulTheme::default())
         .with_prompt("Node name")
         .default(existing.as_ref().map(|c| c.node_name.clone()).unwrap_or_default())
+        .validate_with(|input: &String| -> Result<(), &str> {
+            if input.is_empty() || input.len() > 32 {
+                return Err("Node name must be 1-32 characters");
+            }
+            if !input.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                return Err("Only a-z, A-Z, 0-9, dash, underscore allowed");
+            }
+            if !input.chars().next().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false) {
+                return Err("Must start with alphanumeric character");
+            }
+            Ok(())
+        })
         .interact_text()?;
 
     // Central address
@@ -69,13 +81,24 @@ pub fn run_wizard() -> Result<()> {
     println!();
 
     let recording = configure_recording(&existing)?;
-    let storage = configure_storage(&existing)?;
 
-    println!();
-    println!("~ Security ~");
-    println!();
+    // Only configure storage if recording is enabled
+    let storage = if recording.enabled {
+        configure_storage(&existing)?
+    } else {
+        // Use a default/dummy storage config when recording is disabled
+        StorageConfig::default()
+    };
 
-    let encryption_enabled = configure_encryption(&existing)?;
+    // Only configure encryption if recording is enabled
+    let encryption_enabled = if recording.enabled {
+        println!();
+        println!("~ Security ~");
+        println!();
+        configure_encryption(&existing)?
+    } else {
+        false
+    };
 
     println!();
     println!("~ Streaming ~");
@@ -144,7 +167,7 @@ fn configure_onvif(existing: &Option<RemoteConfig>) -> Result<SourceConfig> {
     println!();
     println!("Connecting to camera at {}...", ip);
 
-    let client = OnvifClient::new(&ip, &username, &password);
+    let mut client = OnvifClient::new(&ip, &username, &password);
 
     match client.get_device_info() {
         Ok(info) => println!("Camera: {}", info),
