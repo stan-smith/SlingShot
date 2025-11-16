@@ -207,7 +207,7 @@ fn setup_admin_user() -> Result<()> {
 
     // Build otpauth URL for QR code
     let otpauth_url = format!(
-        "otpauth://totp/SlingShot:{}?secret={}&issuer=SlingShot&algorithm=SHA1&digits=6&period=30",
+        "otpauth://totp/SlingShot:{}?secret={}&issuer=SlingShot&algorithm=SHA256&digits=6&period=30",
         username, totp_secret
     );
 
