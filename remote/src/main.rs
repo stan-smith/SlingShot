@@ -398,7 +398,7 @@ fn check_pipeline_bus(pipeline: &gstreamer::Pipeline) -> Option<String> {
 async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    println!("~ RTSP REMOTE NODE: {} ~", config.node_name);
+    println!("~ SlingShot remote node: {} ~", config.node_name);
     if debug {
         println!("Debug mode enabled (verbose metrics)");
     }
@@ -1069,7 +1069,7 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
             let _ = marker_stream.finish();
 
             println!();
-            println!("~ READY - Streaming video (stream-per-frame) ~");
+            println!("~ READY - Streaming video ~");
             println!();
 
             // Video frame stats (integrated into main loop for reconnection support)
@@ -1636,7 +1636,7 @@ fn handle_command(
 }
 
 fn handle_ptz_command(parts: Vec<&str>, onvif: &Arc<Mutex<OnvifClient>>) -> Result<String, String> {
-    let client = onvif.lock().unwrap();
+    let mut client = onvif.lock().unwrap();
 
     match parts[0].to_lowercase().as_str() {
         // PTZ continuous move

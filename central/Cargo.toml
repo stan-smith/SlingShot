@@ -67,6 +67,9 @@ audit-log = { path = "../audit-log" }
 # Home directory
 dirs = "5"
 
+# System information (memory monitoring)
+sysinfo = "0.31"
+
 [[bin]]
 name = "rtsp-server"
 path = "src/main.rs"

@@ -9,8 +9,15 @@ Its username is "root" its password is "MINI_VScam00"
 it is an Axis camera
 The camera is known working.
 The device "khadas" is reached over tailscale.
-when you make changes to the "remote" you need to use rsync to move the changes over, you will use the path "khadas@khadas:~/remote"
-you will not send over the target directory because khadas is a different architecture to this machine, it is an aarch64 machine, this machine is x86_64
+
+There is a second remote device, a Raspberry Pi 4, called "raspberry1"
+You can reach it by ssh using this command "ssh pi@raspberry1"
+It has a Wisenet (Samsung) camera attached to its ethernet port, the cameras IP address is: 192.168.2.100
+Its username is "admin" its password is "MINI_VScam00"
+The device "raspberry1" is also reached over tailscale.
+
+when you make changes to the "remote" you need to use rsync to move the changes over, you will use the path "khadas@khadas:~/remote" (or the equivalent for the pi)
+you will not send over the target directory because khadas/pi is a different architecture to this machine, it is an aarch64 machine, this machine is x86_64
 
 The remote crate has local dependencies that also need to be synced:
 ```bash
@@ -30,6 +37,9 @@ After syncing, build on khadas:
 ```bash
 ssh khadas@khadas "source ~/.cargo/env && cd ~/remote && cargo build --release"
 ```
+
+There is a third device, this is what we will run the central binary on, it is located at "ssh s@s-staging-rig" any changes made to the central binary you will need to run on there.
+
 
 If you have any quesitons, ask me, I always prefer you to seek clarity rather than make rash decisions.
 When debugging, if something is not working, despite repeated attempts, let me know, and we will reassess it together.

@@ -5,3 +5,4 @@ Cargo.lock
 *.swp
 .DS_Store
 *additional*
+docker/

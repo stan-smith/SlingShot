@@ -201,10 +201,12 @@ async fn async_main(
         .property("skip-to-first", true)
         .build()?;
 
-    // Capsfilter: set resolution only, framerate controlled via videorate max-rate
+    // Capsfilter: set resolution and force I420 format for browser HLS compatibility
+    // (videotestsrc outputs formats that x264 encodes to High 4:4:4 which browsers can't play)
     let capsfilter = gstreamer::ElementFactory::make("capsfilter")
         .name("caps")
         .property("caps", gstreamer::Caps::builder("video/x-raw")
+            .field("format", "I420")
             .field("width", params.width).field("height", params.height)
             .build())
         .build()?;
@@ -270,7 +272,7 @@ async fn async_main(
             }
         });
     } else {
-        // Test pattern pipeline: videotestsrc -> srccaps -> convert -> scale -> rate -> ...
+        // Test pattern pipeline: videotestsrc -> srccaps -> textoverlay -> convert -> scale -> rate -> ...
         let src = gstreamer::ElementFactory::make("videotestsrc")
             .property("is-live", true)
             .property_from_str("pattern", "smpte")
@@ -281,8 +283,17 @@ async fn async_main(
                 .field("framerate", gstreamer::Fraction::new(30, 1)).build())
             .build()?;
 
-        pipe.add_many([&src, &srccaps, &convert, &scale, &rate, &capsfilter, &encoder, &parser, sink.upcast_ref()])?;
-        gstreamer::Element::link_many([&src, &srccaps, &convert, &scale, &rate, &capsfilter, &encoder, &parser, sink.upcast_ref()])?;
+        // Text overlay showing instance name for easy identification
+        let textoverlay = gstreamer::ElementFactory::make("textoverlay")
+            .property("text", node_name.as_str())
+            .property("font-desc", "Sans Bold 48")
+            .property_from_str("valignment", "top")
+            .property_from_str("halignment", "left")
+            .property("shaded-background", true)
+            .build()?;
+
+        pipe.add_many([&src, &srccaps, &textoverlay, &convert, &scale, &rate, &capsfilter, &encoder, &parser, sink.upcast_ref()])?;
+        gstreamer::Element::link_many([&src, &srccaps, &textoverlay, &convert, &scale, &rate, &capsfilter, &encoder, &parser, sink.upcast_ref()])?;
     }
 
     // Store element references for dynamic control
@@ -487,7 +498,14 @@ async fn async_main(
                 let msg = String::from_utf8_lossy(&buffer);
 
                 if msg.starts_with("CMD|") {
-                    let cmd = msg.strip_prefix("CMD|").unwrap_or("");
+                    // Parse CMD|timestamp|command|signature format
+                    // Extract just the command part (index 2)
+                    let parts: Vec<&str> = msg.splitn(4, '|').collect();
+                    let cmd = if parts.len() >= 3 {
+                        parts[2]  // The actual command
+                    } else {
+                        msg.strip_prefix("CMD|").unwrap_or("")  // Fallback for legacy format
+                    };
                     println!("Received command: {}", cmd);
 
                     let result = handle_command(cmd, &camera_state);

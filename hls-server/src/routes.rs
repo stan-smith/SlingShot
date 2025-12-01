@@ -6,11 +6,34 @@ use axum::{
     routing::get,
     Router,
 };
-use std::sync::Arc;
+use regex::Regex;
+use std::sync::{Arc, LazyLock};
 use tokio_util::io::ReaderStream;
 
 use crate::error::HlsError;
 use crate::state::HlsState;
+
+/// Validate a node name for security.
+/// Node names must be 1-32 chars, alphanumeric plus dash/underscore, start with alphanumeric.
+fn is_valid_node_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 32 {
+        return false;
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return false;
+    }
+    name.chars().next().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false)
+}
+
+/// Validate an HLS segment name.
+/// Segment names must match: segment_XXX.ts (where XXX is 1+ digits)
+static SEGMENT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^segment_\d+\.ts$").unwrap()
+});
+
+fn is_valid_segment_name(name: &str) -> bool {
+    SEGMENT_REGEX.is_match(name)
+}
 
 /// Create the HLS router with all endpoints.
 pub fn hls_router(state: Arc<HlsState>) -> Router {
@@ -30,6 +53,11 @@ async fn live_playlist_handler(
     Path(node): Path<String>,
     State(state): State<Arc<HlsState>>,
 ) -> Result<impl IntoResponse, HlsErrorResponse> {
+    // Validate node name to prevent path traversal
+    if !is_valid_node_name(&node) {
+        return Err(HlsError::InvalidNodeName(node).into());
+    }
+
     // Ensure transcoding is running for this node
     state.ensure_live_stream(&node).await?;
 
@@ -66,6 +94,16 @@ async fn live_segment_handler(
     Path((node, segment)): Path<(String, String)>,
     State(state): State<Arc<HlsState>>,
 ) -> Result<impl IntoResponse, HlsErrorResponse> {
+    // Validate node name to prevent path traversal
+    if !is_valid_node_name(&node) {
+        return Err(HlsError::InvalidNodeName(node).into());
+    }
+
+    // Validate segment name to prevent path traversal
+    if !is_valid_segment_name(&segment) {
+        return Err(HlsError::InvalidSegmentName(segment).into());
+    }
+
     let segment_path = state.hls_dir.join(&node).join(&segment);
 
     if !segment_path.exists() {
@@ -98,6 +136,9 @@ impl IntoResponse for HlsErrorResponse {
             }
             HlsError::SegmentNotFound(_) => (StatusCode::NOT_FOUND, self.0.to_string()),
             HlsError::StreamNotRunning(_) => (StatusCode::SERVICE_UNAVAILABLE, self.0.to_string()),
+            HlsError::InvalidNodeName(_) | HlsError::InvalidSegmentName(_) => {
+                (StatusCode::BAD_REQUEST, self.0.to_string())
+            }
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string()),
         };
 

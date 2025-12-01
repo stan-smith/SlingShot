@@ -19,4 +19,10 @@ pub enum HlsError {
 
     #[error("FFmpeg error: {0}")]
     Ffmpeg(String),
+
+    #[error("Invalid node name: {0}")]
+    InvalidNodeName(String),
+
+    #[error("Invalid segment name: {0}")]
+    InvalidSegmentName(String),
 }
