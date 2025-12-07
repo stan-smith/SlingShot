@@ -34,6 +34,9 @@ serde_json = "1"
 # ONVIF server
 onvif-server = { path = "../onvif-server" }
 
+# XML escaping (for test_remote ONVIF responses)
+quick-xml = "0.37"
+
 # WS-Security authentication
 ws-security = { path = "../ws-security" }
 
@@ -69,6 +72,9 @@ dirs = "5"
 
 # System information (memory monitoring)
 sysinfo = "0.31"
+
+# Rate limiting
+rate-limiter = { path = "../rate-limiter" }
 
 [[bin]]
 name = "rtsp-server"

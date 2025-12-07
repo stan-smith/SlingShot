@@ -14,6 +14,9 @@ quick-xml = "0.37"
 # WS-Security authentication
 ws-security = { path = "../ws-security" }
 
+# Rate limiting
+rate-limiter = { path = "../rate-limiter" }
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 

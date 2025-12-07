@@ -8,7 +8,7 @@
 mod templates;
 
 use axum::{
-    extract::{Path, State},
+    extract::{connect_info::ConnectInfo, Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::post,
@@ -16,8 +16,9 @@ use axum::{
 };
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use rate_limiter::{RateLimitConfig, SharedIpRateLimiter};
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
@@ -36,6 +37,8 @@ pub struct OnvifServerState {
     pub nodes: Arc<Mutex<HashMap<String, NodeHandle>>>,
     pub local_ip: String,
     pub credentials: ws_security::Credentials,
+    /// Rate limiter for ONVIF requests (per-IP)
+    pub rate_limiter: SharedIpRateLimiter,
 }
 
 /// Start the ONVIF HTTP server
@@ -49,6 +52,7 @@ pub async fn run_onvif_server(
         nodes,
         local_ip,
         credentials,
+        rate_limiter: SharedIpRateLimiter::new(RateLimitConfig::onvif()),
     });
 
     let app = Router::new()
@@ -63,7 +67,7 @@ pub async fn run_onvif_server(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("ONVIF server listening on port {}", addr.port());
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 
     Ok(())
 }
@@ -74,11 +78,33 @@ fn check_auth(body: &str, state: &OnvifServerState) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Check rate limit and return appropriate SOAP fault if exceeded
+fn check_rate_limit(
+    state: &OnvifServerState,
+    client_ip: IpAddr,
+) -> Option<(StatusCode, [(&'static str, &'static str); 1], String)> {
+    if !state.rate_limiter.check(&client_ip) {
+        Some((
+            StatusCode::TOO_MANY_REQUESTS,
+            [("Content-Type", "application/soap+xml")],
+            templates::fault("ter:RateLimit", "Too many requests - please slow down"),
+        ))
+    } else {
+        None
+    }
+}
+
 /// Handle discovery requests (list all nodes)
 async fn handle_discovery(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<OnvifServerState>>,
     body: String,
 ) -> impl IntoResponse {
+    // Rate limit check
+    if let Some(rate_limit_response) = check_rate_limit(&state, addr.ip()) {
+        return rate_limit_response;
+    }
+
     if let Err(reason) = check_auth(&body, &state) {
         return (
             StatusCode::UNAUTHORIZED,
@@ -111,10 +137,16 @@ async fn handle_discovery(
 
 /// Handle ONVIF Device Service requests for a specific node
 async fn handle_device_service(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Path(node): Path<String>,
     State(state): State<Arc<OnvifServerState>>,
     body: String,
 ) -> impl IntoResponse {
+    // Rate limit check
+    if let Some(rate_limit_response) = check_rate_limit(&state, addr.ip()) {
+        return rate_limit_response;
+    }
+
     if let Err(reason) = check_auth(&body, &state) {
         return (
             StatusCode::UNAUTHORIZED,
@@ -151,10 +183,16 @@ async fn handle_device_service(
 
 /// Handle ONVIF Media Service requests for a specific node
 async fn handle_media_service(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Path(node): Path<String>,
     State(state): State<Arc<OnvifServerState>>,
     body: String,
 ) -> impl IntoResponse {
+    // Rate limit check
+    if let Some(rate_limit_response) = check_rate_limit(&state, addr.ip()) {
+        return rate_limit_response;
+    }
+
     if let Err(reason) = check_auth(&body, &state) {
         return (
             StatusCode::UNAUTHORIZED,
@@ -191,10 +229,16 @@ async fn handle_media_service(
 
 /// Handle ONVIF PTZ Service requests - translates to internal protocol
 async fn handle_ptz_service(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Path(node): Path<String>,
     State(state): State<Arc<OnvifServerState>>,
     body: String,
 ) -> impl IntoResponse {
+    // Rate limit check
+    if let Some(rate_limit_response) = check_rate_limit(&state, addr.ip()) {
+        return rate_limit_response;
+    }
+
     if let Err(reason) = check_auth(&body, &state) {
         return (
             StatusCode::UNAUTHORIZED,

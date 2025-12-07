@@ -20,4 +20,5 @@ members = [
     "ws-security",
     "audit-log",
     "hls-server",
+    "rate-limiter",
 ]

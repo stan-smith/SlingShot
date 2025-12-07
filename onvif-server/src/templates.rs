@@ -2,6 +2,14 @@
 //!
 //! All XML templates are centralized here to keep the main library clean.
 
+use quick_xml::escape::escape;
+
+/// Escape a string for safe inclusion in XML content/attributes.
+/// Converts &, <, >, ", ' to their XML entity equivalents.
+fn xml_escape(s: &str) -> String {
+    escape(s).to_string()
+}
+
 /// SOAP authentication fault response
 pub fn auth_fault(reason: &str) -> String {
     format!(
@@ -21,7 +29,7 @@ pub fn auth_fault(reason: &str) -> String {
     </s:Fault>
   </s:Body>
 </s:Envelope>"#,
-        reason
+        xml_escape(reason)
     )
 }
 
@@ -44,7 +52,8 @@ pub fn fault(code: &str, reason: &str) -> String {
     </s:Fault>
   </s:Body>
 </s:Envelope>"#,
-        code, reason
+        xml_escape(code),
+        xml_escape(reason)
     )
 }
 
@@ -57,7 +66,8 @@ pub fn service_entry(local_ip: &str, node_name: &str) -> String {
         <tds:XAddr>http://{}:8080/onvif/{}/ptz_service</tds:XAddr>
         <tds:Version><tt:Major>2</tt:Major><tt:Minor>0</tt:Minor></tds:Version>
       </tds:Service>"#,
-        local_ip, node_name
+        xml_escape(local_ip),
+        xml_escape(node_name)
     )
 }
 
@@ -78,6 +88,7 @@ pub fn get_services_response(services: &str) -> String {
 
 /// GetDeviceInformation response
 pub fn get_device_information(node: &str) -> String {
+    let escaped = xml_escape(node);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
@@ -92,12 +103,14 @@ pub fn get_device_information(node: &str) -> String {
     </tds:GetDeviceInformationResponse>
   </s:Body>
 </s:Envelope>"#,
-        node, node
+        escaped, escaped
     )
 }
 
 /// GetCapabilities response
 pub fn get_capabilities(local_ip: &str, node: &str) -> String {
+    let escaped_ip = xml_escape(local_ip);
+    let escaped_node = xml_escape(node);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
@@ -116,12 +129,13 @@ pub fn get_capabilities(local_ip: &str, node: &str) -> String {
     </tds:GetCapabilitiesResponse>
   </s:Body>
 </s:Envelope>"#,
-        local_ip, node, local_ip, node
+        escaped_ip, escaped_node, escaped_ip, escaped_node
     )
 }
 
 /// GetProfiles response
 pub fn get_profiles(node: &str) -> String {
+    let escaped = xml_escape(node);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
@@ -145,7 +159,7 @@ pub fn get_profiles(node: &str) -> String {
     </trt:GetProfilesResponse>
   </s:Body>
 </s:Envelope>"#,
-        node, node, node, node, node
+        escaped, escaped, escaped, escaped, escaped
     )
 }
 
@@ -166,7 +180,8 @@ pub fn get_stream_uri(local_ip: &str, node: &str) -> String {
     </trt:GetStreamUriResponse>
   </s:Body>
 </s:Envelope>"#,
-        local_ip, node
+        xml_escape(local_ip),
+        xml_escape(node)
     )
 }
 
@@ -239,6 +254,7 @@ pub fn get_status_response() -> &'static str {
 
 /// GetConfigurations response
 pub fn get_configurations(node: &str) -> String {
+    let escaped = xml_escape(node);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
@@ -256,12 +272,13 @@ pub fn get_configurations(node: &str) -> String {
     </tptz:GetConfigurationsResponse>
   </s:Body>
 </s:Envelope>"#,
-        node, node
+        escaped, escaped
     )
 }
 
 /// GetNodes response
 pub fn get_nodes(node: &str) -> String {
+    let escaped = xml_escape(node);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
@@ -287,6 +304,6 @@ pub fn get_nodes(node: &str) -> String {
     </tptz:GetNodesResponse>
   </s:Body>
 </s:Envelope>"#,
-        node, node
+        escaped, escaped
     )
 }

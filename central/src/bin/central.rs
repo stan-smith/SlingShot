@@ -9,6 +9,7 @@ use gstreamer_app::AppSrc;
 use gstreamer_rtsp_server::prelude::*;
 use onvif_server::{get_local_ip, run_onvif_server, NodeHandle};
 use quinn::{Endpoint, ServerConfig};
+use rate_limiter::{RateLimitConfig, SharedIpRateLimiter};
 use recording_retrieval::{
     decode_message_type, format_size, FileChunk, FileComplete, FileHeader, FileMessageType,
     FileTransferReceiver, TransferComplete, TransferError, FILE_TRANSFER_MAGIC,
@@ -269,6 +270,9 @@ async fn async_main() -> Result<()> {
         }
     });
 
+    // Create rate limiter for QUIC connections
+    let quic_rate_limiter = SharedIpRateLimiter::new(RateLimitConfig::quic_commands());
+
     // Spawn connection acceptor
     let nodes_clone = Arc::clone(&nodes);
     let onvif_nodes_clone = Arc::clone(&onvif_nodes);
@@ -279,9 +283,19 @@ async fn async_main() -> Result<()> {
     let central_fp_conn = central_fingerprint.clone();
     let audit_logger_conn = audit_logger.clone();
     let endpoint_clone = endpoint.clone();
+    let rate_limiter_clone = quic_rate_limiter.clone();
     tokio::spawn(async move {
         loop {
             if let Some(incoming) = endpoint_clone.accept().await {
+                let remote_addr = incoming.remote_address();
+                let remote_ip = remote_addr.ip();
+
+                // Rate limit connection attempts per IP
+                if !rate_limiter_clone.check(&remote_ip) {
+                    println!("[Rate limited] Connection from {} rejected", remote_addr);
+                    continue;
+                }
+
                 let nodes = Arc::clone(&nodes_clone);
                 let onvif_nodes = Arc::clone(&onvif_nodes_clone);
                 let mounts = Arc::clone(&mounts_clone);

@@ -13,6 +13,7 @@ use axum::{
 use fingerprint_store::FingerprintStore;
 use futures::{SinkExt, StreamExt};
 use hls_server::HlsState;
+use rate_limiter::{RateLimitConfig, SharedIpRateLimiter};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -51,6 +52,8 @@ pub struct AdminState {
     pub hls_state: Arc<HlsState>,
     /// IP-based rate limiting for authentication
     pub rate_limits: Mutex<HashMap<IpAddr, RateLimitEntry>>,
+    /// Message rate limiter for WebSocket commands (per-IP)
+    pub message_rate_limiter: SharedIpRateLimiter,
 }
 
 /// Command from admin to daemon
@@ -79,6 +82,7 @@ impl AdminState {
             store,
             hls_state: Arc::new(HlsState::new(hls_dir, rtsp_port)),
             rate_limits: Mutex::new(HashMap::new()),
+            message_rate_limiter: SharedIpRateLimiter::new(RateLimitConfig::websocket_admin()),
         }
     }
 
@@ -334,6 +338,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<AdminState>, client_ip: IpA
         if let Message::Text(text) = msg {
             let line = text.trim();
             if line.is_empty() {
+                continue;
+            }
+
+            // Rate limit check for messages
+            if !state_clone.message_rate_limiter.check(&client_ip) {
+                if let Some(tx) = state_clone.sessions.lock().await.get(&session_id) {
+                    let _ = tx.send("ERROR|Rate limited - too many requests".to_string()).await;
+                }
                 continue;
             }
 

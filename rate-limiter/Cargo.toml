@@ -1,0 +1,11 @@
+[package]
+name = "rate-limiter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# For HashMap with concurrent access
+dashmap = "6"
+
+# Time handling and async runtime
+tokio = { version = "1", features = ["time", "rt"] }

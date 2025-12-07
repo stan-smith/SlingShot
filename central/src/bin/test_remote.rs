@@ -18,6 +18,12 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
 use onvif_server::{extract_position, extract_soap_action, extract_velocity, get_local_ip};
+use quick_xml::escape::escape;
+
+/// Escape a string for safe inclusion in XML content/attributes.
+fn xml_escape(s: &str) -> String {
+    escape(s).to_string()
+}
 
 /// Generate SOAP fault response
 fn soap_fault(code: &str, reason: &str) -> String {
@@ -38,7 +44,8 @@ fn soap_fault(code: &str, reason: &str) -> String {
     </s:Fault>
   </s:Body>
 </s:Envelope>"#,
-        code, reason
+        xml_escape(code),
+        xml_escape(reason)
     )
 }
 use quinn::Endpoint;
@@ -659,8 +666,9 @@ fn handle_command(cmd: &str, state: &Arc<Mutex<TestCameraState>>) -> Result<Stri
             camera.params.height = height;
 
             if let Some(ref caps) = camera.capsfilter {
-                // Resolution only, framerate controlled via videorate
+                // Must include format I420 for browser HLS compatibility
                 let new_caps = gstreamer::Caps::builder("video/x-raw")
+                    .field("format", "I420")
                     .field("width", width)
                     .field("height", height)
                     .build();

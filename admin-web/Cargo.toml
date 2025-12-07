@@ -10,5 +10,6 @@ futures = "0.3"
 anyhow = "1"
 fingerprint-store = { path = "../fingerprint-store" }
 hls-server = { path = "../hls-server" }
+rate-limiter = { path = "../rate-limiter" }
 base64 = "0.22"
 chrono = "0.4"
