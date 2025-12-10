@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>SlingShot Admin</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.4.14/dist/hls.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/*
+ * LAYOUT VARIANT B: SPLIT HORIZONTAL
+ *
+ * Top row: nodes as horizontal scrollable cards
+ * Bottom split: Video on left, Controls + Log on right
+ * Compact header, command bar integrated into header
+ *
+ * Layout:
+ * +------------------------------------------+
+ * |  LOGO  |  [cmd input]  |  STATUS  | LOG  |
+ * +------------------------------------------+
+ * | NODE1 | NODE2 | NODE3 | NODE4 | ...      |
+ * +---------------------+--------------------+
+ * |                     |     CONTROLS       |
+ * |       VIDEO         |--------------------|
+ * |                     |     ACTIVITY       |
+ * +---------------------+--------------------+
+ */
+
+:root {
+  --bg-primary: #f8fafc;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #f1f5f9;
+  --text-primary: #1e293b;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+  --accent-primary: #2563eb;
+  --accent-primary-light: #dbeafe;
+  --status-success: #22c55e;
+  --status-warning: #f59e0b;
+  --status-error: #ef4444;
+  --status-info: #0ea5e9;
+  --border-color: #e2e8f0;
+  --border-radius: 8px;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'Inter', sans-serif;
+  font-size: 14px;
+}
+
+.app {
+  display: grid;
+  grid-template-rows: 52px 80px 1fr;
+  grid-template-columns: 1fr 360px;
+  height: 100vh;
+  gap: 1px;
+  background: var(--border-color);
+}
+
+/* Header with integrated command */
+.header {
+  grid-column: 1 / -1;
+  background: var(--bg-secondary);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  gap: 16px;
+}
+.header h1 { font-size: 16px; font-weight: 600; white-space: nowrap; }
+.command-input {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  background: var(--bg-tertiary);
+  border-radius: var(--border-radius);
+  padding: 0 12px;
+  max-width: 500px;
+}
+.command-input span { color: var(--accent-primary); margin-right: 8px; }
+.command-input input {
+  flex: 1; border: none; background: transparent; padding: 8px 0;
+  font-family: monospace; font-size: 13px;
+}
+.command-input input:focus { outline: none; }
+.status { display: flex; align-items: center; gap: 12px; font-size: 13px; margin-left: auto; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--status-error); }
+.status-dot.connected { background: var(--status-success); }
+.logout-btn {
+  background: transparent; border: 1px solid var(--border-color);
+  color: var(--text-secondary); padding: 6px 12px; font-size: 11px;
+  border-radius: var(--border-radius); text-decoration: none; cursor: pointer;
+}
+.logout-btn:hover { border-color: var(--status-error); color: var(--status-error); }
+
+/* Nodes as horizontal scrollable bar */
+.nodes-bar {
+  grid-column: 1 / -1;
+  background: var(--bg-secondary);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  overflow-x: auto;
+}
+.nodes-bar::-webkit-scrollbar { height: 6px; }
+.nodes-bar::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
+.node-search {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.node-search input {
+  width: 150px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  padding: 8px 12px;
+  border-radius: var(--border-radius);
+  font-size: 12px;
+}
+.node-search input:focus { outline: none; border-color: var(--accent-primary); }
+.nodes-section {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.nodes-section-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.node-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--bg-tertiary);
+  border: 1px solid transparent;
+  border-radius: var(--border-radius);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.node-card:hover { border-color: var(--border-color); background: var(--bg-primary); }
+.node-card.selected { background: var(--accent-primary-light); border-color: var(--accent-primary); color: var(--accent-primary); }
+.node-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--status-success); flex-shrink: 0; }
+.node-card.pending .node-dot { background: var(--status-warning); }
+.node-card .actions { display: flex; gap: 4px; margin-left: 4px; }
+.node-card .actions button { padding: 2px 6px; font-size: 10px; }
+.no-nodes { color: var(--text-muted); font-size: 12px; padding: 8px; white-space: nowrap; }
+.divider { width: 1px; height: 40px; background: var(--border-color); flex-shrink: 0; }
+
+/* Video panel - main view */
+.video-panel {
+  background: var(--bg-tertiary);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.video-container {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0f172a;
+  margin: 12px;
+  border-radius: var(--border-radius);
+  position: relative;
+}
+#video-player { max-width: 100%; max-height: 100%; width: 100%; height: 100%; object-fit: contain; }
+#video-placeholder { position: absolute; color: var(--text-muted); font-size: 14px; }
+.video-status { padding: 8px 16px; font-size: 12px; color: var(--text-muted); background: var(--bg-secondary); }
+
+/* Right panel - controls + log stacked */
+.right-panel {
+  background: var(--bg-secondary);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.control-section {
+  padding: 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+.tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+.tab {
+  padding: 8px 14px; border: none; background: var(--bg-tertiary);
+  color: var(--text-muted); font-size: 11px; font-weight: 500;
+  border-radius: var(--border-radius); cursor: pointer;
+}
+.tab:hover { color: var(--text-secondary); }
+.tab.active { background: var(--accent-primary); color: white; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+.placeholder { color: var(--text-muted); font-size: 13px; text-align: center; padding: 20px; }
+
+.control-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.control-row label { font-size: 11px; color: var(--text-muted); font-weight: 500; min-width: 60px; }
+.control-row input, .control-row select {
+  background: var(--bg-tertiary); border: 1px solid var(--border-color);
+  padding: 6px 10px; border-radius: var(--border-radius); font-size: 12px;
+}
+.control-row input:focus { outline: none; border-color: var(--accent-primary); }
+button {
+  background: var(--bg-tertiary); border: 1px solid var(--border-color);
+  padding: 6px 12px; border-radius: var(--border-radius); font-size: 11px;
+  font-weight: 500; cursor: pointer;
+}
+button:hover { background: var(--bg-primary); border-color: var(--text-muted); }
+button.primary { background: var(--accent-primary); color: white; border-color: var(--accent-primary); }
+button.approve { background: var(--status-success); color: white; border-color: var(--status-success); }
+button.reject { background: var(--status-error); color: white; border-color: var(--status-error); }
+.btn-sm { padding: 4px 8px; min-width: 36px; }
+
+.ptz-grid { display: grid; grid-template-columns: repeat(3, 36px); gap: 4px; justify-content: center; margin: 10px 0; }
+.ptz-grid button { width: 36px; height: 36px; padding: 0; font-size: 14px; }
+.ptz-center { background: var(--accent-primary); color: white; border-color: var(--accent-primary); }
+
+/* Log section - bottom of right panel */
+.log-section {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 150px;
+}
+.log-header {
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 500;
+  border-bottom: 1px solid var(--border-color);
+}
+.log-controls { display: flex; gap: 6px; align-items: center; }
+.log-controls select { background: var(--bg-tertiary); border: 1px solid var(--border-color); font-size: 10px; padding: 4px; border-radius: 4px; }
+#log { flex: 1; overflow-y: auto; padding: 8px 16px; font-size: 11px; font-family: monospace; }
+.log-line { padding: 3px 0; }
+.pending { color: var(--status-warning); }
+.approved { color: var(--status-success); }
+.rejected { color: var(--status-error); }
+.response { color: var(--status-info); }
+.command { color: var(--text-muted); }
+
+/* Login */
+.login-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(15, 23, 42, 0.8); backdrop-filter: blur(8px);
+  display: flex; align-items: center; justify-content: center; z-index: 1000;
+}
+.login-box {
+  background: var(--bg-secondary); padding: 40px; border-radius: 16px;
+  box-shadow: var(--shadow-sm); text-align: center; min-width: 340px;
+}
+.login-box h2 { font-size: 22px; margin-bottom: 24px; }
+.login-box input {
+  display: block; width: 100%; margin: 10px 0; padding: 12px;
+  background: var(--bg-tertiary); border: 1px solid var(--border-color);
+  border-radius: var(--border-radius); font-size: 14px;
+}
+.login-box input:focus { outline: none; border-color: var(--accent-primary); }
+.login-box button { width: 100%; margin-top: 16px; padding: 12px; }
+.login-error { color: var(--status-error); font-size: 13px; margin-top: 12px; }
+.node-name .match { color: var(--accent-primary); font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="login-overlay" class="login-overlay">
+  <div class="login-box">
+    <h2>SlingShot Admin</h2>
+    <input type="text" id="login-username" placeholder="Username" value="admin">
+    <input type="text" id="login-totp" placeholder="6-digit code" maxlength="6" onkeydown="if(event.key==='Enter')login()" autocomplete="off">
+    <button class="primary" onclick="login()">Sign In</button>
+    <div id="login-error" class="login-error"></div>
+  </div>
+</div>
+
+<div class="app">
+  <header class="header">
+    <h1>SlingShot</h1>
+    <div class="command-input">
+      <span>$</span>
+      <input id="cmd" placeholder="Enter command..." autofocus>
+    </div>
+    <div class="status">
+      <div class="status-dot" id="status-dot"></div>
+      <span id="status-text">Disconnected</span>
+    </div>
+    <a href="/admin" id="admin-link" class="logout-btn" style="display:none">Users</a>
+    <button id="logout-btn" class="logout-btn" onclick="logout()" style="display:none">Sign Out</button>
+  </header>
+
+  <nav class="nodes-bar">
+    <div class="node-search">
+      <input type="text" id="node-search" placeholder="Filter..." oninput="filterNodes()">
+    </div>
+    <div class="divider"></div>
+    <div class="nodes-section">
+      <span class="nodes-section-label">Connected</span>
+      <div id="connected-nodes"><span class="no-nodes">No nodes</span></div>
+    </div>
+    <div class="divider"></div>
+    <div class="nodes-section">
+      <span class="nodes-section-label">Pending</span>
+      <div id="pending-nodes"><span class="no-nodes">None</span></div>
+    </div>
+  </nav>
+
+  <main class="video-panel">
+    <div class="video-container">
+      <video id="video-player" playsinline muted></video>
+      <div id="video-placeholder">Select a node to view stream</div>
+    </div>
+    <div class="video-status"><span id="video-status"></span></div>
+  </main>
+
+  <aside class="right-panel">
+    <div class="control-section">
+      <div class="tabs">
+        <button class="tab active" data-tab="stream">Stream</button>
+        <button class="tab" data-tab="ptz">PTZ</button>
+        <button class="tab" data-tab="recording">Rec</button>
+      </div>
+      <div id="no-node-selected" class="placeholder">Select a node</div>
+      <div id="control-content" style="display:none">
+        <div id="tab-stream" class="tab-content active">
+          <div class="control-row">
+            <label>Resolution</label>
+            <button class="btn-sm" onclick="setResolution(1920,1080)">1080p</button>
+            <button class="btn-sm" onclick="setResolution(1280,720)">720p</button>
+            <button class="btn-sm" onclick="setResolution(854,480)">480p</button>
+          </div>
+          <div class="control-row">
+            <label>Bitrate</label>
+            <input type="number" id="bitrate" value="2000" style="width:70px">
+            <span style="font-size:11px;color:var(--text-muted)">kbps</span>
+            <button onclick="setBitrate()">Set</button>
+          </div>
+          <div class="control-row">
+            <label>FPS</label>
+            <button class="btn-sm" onclick="setFps(30)">30</button>
+            <button class="btn-sm" onclick="setFps(25)">25</button>
+            <button class="btn-sm" onclick="setFps(15)">15</button>
+          </div>
+          <div class="control-row">
+            <button onclick="getParams()">Refresh</button>
+            <button onclick="restartPipeline()" style="border-color:var(--status-warning);color:var(--status-warning)">Restart</button>
+          </div>
+        </div>
+        <div id="tab-ptz" class="tab-content">
+          <div class="control-row">
+            <label>Speed</label>
+            <input type="range" id="ptz-speed" min="0.1" max="1" step="0.1" value="0.5" style="width:100px">
+          </div>
+          <div class="ptz-grid">
+            <div></div>
+            <button onmousedown="ptzMove('up')" onmouseup="ptzStop()" onmouseleave="ptzStop()">&#9650;</button>
+            <div></div>
+            <button onmousedown="ptzMove('left')" onmouseup="ptzStop()" onmouseleave="ptzStop()">&#9664;</button>
+            <button class="ptz-center" onclick="ptzHome()">&#8962;</button>
+            <button onmousedown="ptzMove('right')" onmouseup="ptzStop()" onmouseleave="ptzStop()">&#9654;</button>
+            <div></div>
+            <button onmousedown="ptzMove('down')" onmouseup="ptzStop()" onmouseleave="ptzStop()">&#9660;</button>
+            <div></div>
+          </div>
+          <div class="control-row" style="justify-content:center">
+            <button onmousedown="ptzMove('zoomout')" onmouseup="ptzStop()">Zoom -</button>
+            <button onmousedown="ptzMove('zoomin')" onmouseup="ptzStop()">Zoom +</button>
+          </div>
+        </div>
+        <div id="tab-recording" class="tab-content">
+          <div class="control-row">
+            <button onclick="downloadRecordingsQuick('5 mins ago')">5m</button>
+            <button onclick="downloadRecordingsQuick('15 mins ago')">15m</button>
+            <button onclick="downloadRecordingsQuick('last hour')">1h</button>
+            <button onclick="downloadRecordingsQuick('since midnight')">Today</button>
+          </div>
+          <div class="control-row">
+            <label>From</label>
+            <input type="datetime-local" id="rec-from" style="width:auto">
+          </div>
+          <div class="control-row">
+            <label>To</label>
+            <input type="datetime-local" id="rec-to" style="width:auto">
+            <button class="primary" onclick="getCustomRecordings()">Download</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="log-section">
+      <div class="log-header">
+        <span>Activity</span>
+        <div class="log-controls">
+          <select id="log-filter">
+            <option value="all">All</option>
+            <option value="approval">Approvals</option>
+            <option value="command">Commands</option>
+            <option value="response">Responses</option>
+          </select>
+          <button onclick="clearLog()">Clear</button>
+        </div>
+      </div>
+      <div id="log"></div>
+    </div>
+  </aside>
+</div>
+
+<script>
+let ws = null, selectedNode = null, connectedNodes = new Map(), pendingNodes = new Map();
+let commandHistory = [], historyIndex = -1, ptzContinuous = false, nodeSearchQuery = '';
+let sessionToken = localStorage.getItem('admin_session'), pendingCredentials = null, userRole = null, hls = null;
+const video = document.getElementById('video-player'), videoPlaceholder = document.getElementById('video-placeholder');
+const videoStatus = document.getElementById('video-status'), log = document.getElementById('log'), cmd = document.getElementById('cmd');
+const statusDot = document.getElementById('status-dot'), statusText = document.getElementById('status-text');
+const loginOverlay = document.getElementById('login-overlay'), loginError = document.getElementById('login-error');
+const logoutBtn = document.getElementById('logout-btn'), adminLink = document.getElementById('admin-link');
+
+function fuzzyMatch(p, s) {
+  p = p.toLowerCase(); s = s.toLowerCase();
+  if (!p.length) return { score: 1, matches: [] };
+  if (p.length > s.length) return { score: -1, matches: [] };
+  const idx = s.indexOf(p);
+  if (idx !== -1) { const m = []; for (let i = 0; i < p.length; i++) m.push(idx + i); return { score: 100 + (s.length - p.length), matches: m }; }
+  let pi = 0, score = 0, last = -1; const matches = [];
+  for (let i = 0; i < s.length && pi < p.length; i++) {
+    if (s[i] === p[pi]) { matches.push(i); if (last === i - 1) score += 10; if (i === 0 || '-_ '.includes(s[i-1])) score += 5; score++; last = i; pi++; }
+  }
+  return pi === p.length ? { score, matches } : { score: -1, matches: [] };
+}
+function filterNodes() { nodeSearchQuery = document.getElementById('node-search').value; updateNodeList(); updatePendingList(); }
+function highlightMatches(name, matches) {
+  if (!matches.length) return document.createTextNode(name);
+  const span = document.createElement('span'); span.className = 'node-name'; let last = 0;
+  for (const i of matches) {
+    if (i > last) span.appendChild(document.createTextNode(name.slice(last, i)));
+    const h = document.createElement('span'); h.className = 'match'; h.textContent = name[i]; span.appendChild(h); last = i + 1;
+  }
+  if (last < name.length) span.appendChild(document.createTextNode(name.slice(last)));
+  return span;
+}
+
+initHls(); setupTabs(); if (sessionToken) connectWebSocket();
+
+function initHls() {
+  if (Hls.isSupported()) {
+    hls = new Hls({ liveSyncDuration: 3, liveMaxLatencyDuration: 10, enableWorker: true, lowLatencyMode: true });
+    hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(() => {}); videoStatus.textContent = 'Playing'; });
+    hls.on(Hls.Events.ERROR, (e, d) => { if (d.fatal) { videoStatus.textContent = 'Error'; if (d.type === Hls.ErrorTypes.NETWORK_ERROR) setTimeout(() => hls?.startLoad(), 3000); }});
+    hls.on(Hls.Events.FRAG_BUFFERED, () => { videoStatus.textContent = 'Playing'; });
+  } else if (video.canPlayType('application/vnd.apple.mpegurl')) video.addEventListener('loadedmetadata', () => video.play());
+}
+function playLive(n) { if (!n) return; videoPlaceholder.style.display = 'none'; video.style.display = 'block'; videoStatus.textContent = 'Connecting...'; if (hls) hls.loadSource(`/hls/${n}/stream.m3u8`); else video.src = `/hls/${n}/stream.m3u8`; }
+function stopVideo() { if (hls) hls.stopLoad(); video.style.display = 'none'; videoPlaceholder.style.display = 'flex'; videoStatus.textContent = ''; }
+function downloadRecordingsQuick(t) {
+  if (!selectedNode) return; const now = new Date(); let from;
+  if (t === '5 mins ago') from = new Date(now - 5*60*1000);
+  else if (t === '15 mins ago') from = new Date(now - 15*60*1000);
+  else if (t === 'last hour') from = new Date(now - 60*60*1000);
+  else if (t === 'since midnight') { from = new Date(now); from.setHours(0,0,0,0); }
+  else from = new Date(now - 5*60*1000);
+  sendCommand(`${selectedNode} recordings ${from.toISOString()} ${now.toISOString()}`);
+}
+function login() {
+  const u = document.getElementById('login-username').value, c = document.getElementById('login-totp').value;
+  if (!u || !c) { loginError.textContent = 'Enter credentials'; return; }
+  if (c.length !== 6 || !/^\d+$/.test(c)) { loginError.textContent = 'Code must be 6 digits'; return; }
+  loginError.textContent = ''; pendingCredentials = { username: u, code: c }; connectWebSocket();
+}
+function logout() { localStorage.removeItem('admin_session'); sessionToken = null; userRole = null; if (ws) ws.close(); location.reload(); }
+function connectWebSocket() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { if (sessionToken) ws.send(`TOKEN|${sessionToken}`); else if (pendingCredentials) { ws.send(`TOTP|${pendingCredentials.username}|${pendingCredentials.code}`); pendingCredentials = null; }};
+  ws.onclose = () => { statusDot.classList.remove('connected'); statusText.textContent = 'Disconnected'; if (sessionToken) { append('Reconnecting...', 'system'); setTimeout(connectWebSocket, 3000); }};
+  ws.onerror = () => append('Error', 'error');
+  ws.onmessage = handleMessage;
+}
+function handleMessage(e) {
+  const msg = e.data;
+  if (msg.startsWith('AUTH_OK|')) {
+    const parts = msg.split('|'), token = parts[1], role = parts[2] || 'user';
+    if (token) { sessionToken = token; localStorage.setItem('admin_session', token); }
+    userRole = role; loginOverlay.style.display = 'none'; logoutBtn.style.display = 'block';
+    if (role === 'admin') adminLink.style.display = 'block';
+    statusDot.classList.add('connected'); statusText.textContent = 'Connected';
+    append('Authenticated: ' + role, 'system'); ws.send('nodes'); return;
+  } else if (msg === 'AUTH_FAILED') {
+    localStorage.removeItem('admin_session'); sessionToken = null; userRole = null;
+    loginOverlay.style.display = 'flex'; logoutBtn.style.display = 'none'; adminLink.style.display = 'none';
+    loginError.textContent = 'Invalid credentials'; if (ws) ws.close(); return;
+  }
+  if (msg.startsWith('PENDING|')) { const [_, name, fp, addr] = msg.split('|'); pendingNodes.set(name, { fingerprint: fp, address: addr }); updatePendingList(); append(`[PENDING] ${name}`, 'pending'); }
+  else if (msg.startsWith('APPROVED|')) { pendingNodes.delete(msg.split('|')[1]); updatePendingList(); append(`[APPROVED] ${msg.split('|')[1]}`, 'approved'); }
+  else if (msg.startsWith('REJECTED|')) { pendingNodes.delete(msg.split('|')[1]); updatePendingList(); append(`[REJECTED] ${msg.split('|')[1]}`, 'rejected'); }
+  else if (msg.startsWith('CONNECTED|')) { const n = msg.split('|')[1]; connectedNodes.set(n, { status: 'connected' }); updateNodeList(); append(`[CONNECTED] ${n}`, 'approved'); }
+  else if (msg.startsWith('DISCONNECTED|')) { const n = msg.split('|')[1]; connectedNodes.delete(n); if (selectedNode === n) { selectedNode = null; updateControlPanel(); stopVideo(); } updateNodeList(); append(`[DISCONNECTED] ${n}`, 'rejected'); }
+  else if (msg.startsWith('Connected nodes:')) { const lines = msg.split('\n'); connectedNodes.clear(); for (const l of lines) { const m = l.match(/^\s+(\S+)\s+-\s+/); if (m) connectedNodes.set(m[1], { status: 'connected' }); } updateNodeList(); }
+  else if (msg.startsWith('[')) append(msg, 'response');
+  else append(msg);
+}
+function sendCommand(c) { if (ws?.readyState === WebSocket.OPEN) { append('> ' + c, 'command'); ws.send(c); commandHistory.push(c); historyIndex = commandHistory.length; }}
+function selectNode(n) { selectedNode = n; updateNodeList(); updateControlPanel(); sendCommand(`${n} params`); playLive(n); }
+function approveNode(n) { sendCommand(`approve ${n}`); }
+function rejectNode(n) { sendCommand(`reject ${n}`); }
+
+function updateNodeList() {
+  const container = document.getElementById('connected-nodes');
+  if (!connectedNodes.size) { container.innerHTML = '<span class="no-nodes">No nodes</span>'; return; }
+  const filtered = []; connectedNodes.forEach((info, name) => { const r = fuzzyMatch(nodeSearchQuery, name); if (r.score >= 0) filtered.push({ name, score: r.score, matches: r.matches }); });
+  filtered.sort((a, b) => b.score - a.score); container.innerHTML = '';
+  if (!filtered.length) { container.innerHTML = '<span class="no-nodes">No matches</span>'; return; }
+  filtered.forEach(({ name, matches }) => {
+    const card = document.createElement('div'); card.className = 'node-card' + (selectedNode === name ? ' selected' : '');
+    const dot = document.createElement('div'); dot.className = 'node-dot';
+    card.appendChild(dot); card.appendChild(highlightMatches(name, matches)); card.onclick = () => selectNode(name); container.appendChild(card);
+  });
+}
+function updatePendingList() {
+  const container = document.getElementById('pending-nodes');
+  if (!pendingNodes.size) { container.innerHTML = '<span class="no-nodes">None</span>'; return; }
+  const filtered = []; pendingNodes.forEach((info, name) => { const r = fuzzyMatch(nodeSearchQuery, name); if (r.score >= 0) filtered.push({ name, score: r.score, matches: r.matches }); });
+  filtered.sort((a, b) => b.score - a.score); container.innerHTML = '';
+  if (!filtered.length) { container.innerHTML = '<span class="no-nodes">No matches</span>'; return; }
+  filtered.forEach(({ name, matches }) => {
+    const card = document.createElement('div'); card.className = 'node-card pending';
+    const dot = document.createElement('div'); dot.className = 'node-dot';
+    const actions = document.createElement('div'); actions.className = 'actions';
+    const aBtn = document.createElement('button'); aBtn.className = 'approve'; aBtn.textContent = '✓'; aBtn.onclick = (e) => { e.stopPropagation(); approveNode(name); };
+    const rBtn = document.createElement('button'); rBtn.className = 'reject'; rBtn.textContent = '✕'; rBtn.onclick = (e) => { e.stopPropagation(); rejectNode(name); };
+    actions.appendChild(aBtn); actions.appendChild(rBtn);
+    card.appendChild(dot); card.appendChild(highlightMatches(name, matches)); card.appendChild(actions); container.appendChild(card);
+  });
+}
+function updateControlPanel() {
+  const content = document.getElementById('control-content'), placeholder = document.getElementById('no-node-selected');
+  if (selectedNode) { content.style.display = 'block'; placeholder.style.display = 'none'; }
+  else { content.style.display = 'none'; placeholder.style.display = 'block'; }
+}
+function setupTabs() {
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.onclick = () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      tab.classList.add('active'); document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+    };
+  });
+}
+function setResolution(w, h) { if (selectedNode) sendCommand(`${selectedNode} res ${w} ${h}`); }
+function setBitrate() { const b = document.getElementById('bitrate').value; if (selectedNode && b) sendCommand(`${selectedNode} bitrate ${b}`); }
+function setFps(r) { if (selectedNode) sendCommand(`${selectedNode} fps ${r}`); }
+function getParams() { if (selectedNode) sendCommand(`${selectedNode} params`); }
+function restartPipeline() { if (selectedNode) sendCommand(`${selectedNode} restart`); }
+function ptzMove(d) { if (!selectedNode) return; const s = document.getElementById('ptz-speed').value; ptzContinuous = true; sendCommand(`${selectedNode} ${d} ${s}`); }
+function ptzStop() { if (ptzContinuous && selectedNode) { sendCommand(`${selectedNode} stop`); ptzContinuous = false; }}
+function ptzHome() { if (selectedNode) sendCommand(`${selectedNode} home`); }
+function getCustomRecordings() {
+  const f = document.getElementById('rec-from').value, t = document.getElementById('rec-to').value;
+  if (selectedNode && f && t) sendCommand(`${selectedNode} recordings ${new Date(f).toISOString()} ${new Date(t).toISOString()}`);
+}
+function append(text, cls) {
+  const line = document.createElement('div'); line.className = 'log-line'; line.textContent = text;
+  if (cls) line.classList.add(cls);
+  line.dataset.type = cls === 'pending' || cls === 'approved' || cls === 'rejected' ? 'approval' : cls === 'command' ? 'command' : cls === 'response' ? 'response' : 'info';
+  log.appendChild(line); applyFilter(line); log.scrollTop = log.scrollHeight;
+}
+function applyFilter(line) { const f = document.getElementById('log-filter').value; line.style.display = (f === 'all' || line.dataset.type === f) ? '' : 'none'; }
+document.getElementById('log-filter').onchange = () => document.querySelectorAll('.log-line').forEach(applyFilter);
+function clearLog() { log.innerHTML = ''; }
+cmd.onkeydown = (e) => {
+  if (e.key === 'Enter' && cmd.value.trim()) { sendCommand(cmd.value.trim()); cmd.value = ''; }
+  else if (e.key === 'ArrowUp') { if (historyIndex > 0) { historyIndex--; cmd.value = commandHistory[historyIndex]; } e.preventDefault(); }
+  else if (e.key === 'ArrowDown') { if (historyIndex < commandHistory.length - 1) { historyIndex++; cmd.value = commandHistory[historyIndex]; } else { historyIndex = commandHistory.length; cmd.value = ''; } e.preventDefault(); }
+};
+</script>
+</body>
+</html>

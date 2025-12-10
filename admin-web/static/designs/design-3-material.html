@@ -1,0 +1,1309 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>SlingShot Admin</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.4.14/dist/hls.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
+<style>
+/*
+ * DESIGN 3: MATERIAL DESIGN 3
+ *
+ * Google Material Design 3 inspired featuring:
+ * - Card-based layout with elevation shadows
+ * - Purple/teal dynamic color scheme
+ * - Rounded corners and smooth transitions
+ * - Material icons and typography (Roboto)
+ * - Surface tints and state layers
+ */
+
+:root {
+  /* Material 3 Dark Theme */
+  --md-sys-color-primary: #D0BCFF;
+  --md-sys-color-on-primary: #381E72;
+  --md-sys-color-primary-container: #4F378B;
+  --md-sys-color-on-primary-container: #EADDFF;
+
+  --md-sys-color-secondary: #CCC2DC;
+  --md-sys-color-on-secondary: #332D41;
+  --md-sys-color-secondary-container: #4A4458;
+  --md-sys-color-on-secondary-container: #E8DEF8;
+
+  --md-sys-color-tertiary: #EFB8C8;
+  --md-sys-color-on-tertiary: #492532;
+  --md-sys-color-tertiary-container: #633B48;
+  --md-sys-color-on-tertiary-container: #FFD8E4;
+
+  --md-sys-color-surface: #1C1B1F;
+  --md-sys-color-surface-dim: #141218;
+  --md-sys-color-surface-bright: #3B383E;
+  --md-sys-color-surface-container-lowest: #0F0D13;
+  --md-sys-color-surface-container-low: #1D1B20;
+  --md-sys-color-surface-container: #211F26;
+  --md-sys-color-surface-container-high: #2B2930;
+  --md-sys-color-surface-container-highest: #36343B;
+
+  --md-sys-color-on-surface: #E6E1E5;
+  --md-sys-color-on-surface-variant: #CAC4D0;
+  --md-sys-color-outline: #938F99;
+  --md-sys-color-outline-variant: #49454F;
+
+  --md-sys-color-error: #F2B8B5;
+  --md-sys-color-on-error: #601410;
+  --md-sys-color-error-container: #8C1D18;
+
+  /* Custom status colors */
+  --status-success: #7DD181;
+  --status-warning: #FFB951;
+  --status-error: #F2B8B5;
+  --status-info: #7DCFFF;
+
+  /* Elevation shadows */
+  --elevation-1: 0 1px 2px rgba(0,0,0,0.3), 0 1px 3px 1px rgba(0,0,0,0.15);
+  --elevation-2: 0 1px 2px rgba(0,0,0,0.3), 0 2px 6px 2px rgba(0,0,0,0.15);
+  --elevation-3: 0 4px 8px 3px rgba(0,0,0,0.15), 0 1px 3px rgba(0,0,0,0.3);
+
+  --border-radius-sm: 8px;
+  --border-radius-md: 12px;
+  --border-radius-lg: 16px;
+  --border-radius-xl: 28px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+body {
+  background: var(--md-sys-color-surface-dim);
+  color: var(--md-sys-color-on-surface);
+  font-family: 'Roboto', sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.app {
+  display: grid;
+  grid-template-rows: 64px minmax(0, 1fr) 56px;
+  grid-template-columns: 260px 1fr 300px 300px;
+  height: 100vh;
+  max-height: 100vh;
+  gap: 12px;
+  padding: 12px;
+  background: var(--md-sys-color-surface-dim);
+}
+
+/* Header - App bar style */
+.header {
+  grid-column: 1 / -1;
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--border-radius-lg);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  box-shadow: var(--elevation-1);
+}
+.header h1 {
+  font-size: 22px;
+  font-weight: 400;
+  color: var(--md-sys-color-on-surface);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.header h1 .material-symbols-outlined {
+  font-size: 28px;
+  color: var(--md-sys-color-primary);
+}
+.status {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 14px;
+}
+.status-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: var(--md-sys-color-surface-container-high);
+  border-radius: var(--border-radius-sm);
+}
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--status-error);
+}
+.status-dot.connected {
+  background: var(--status-success);
+}
+
+/* Panels - Card style */
+.nodes-panel {
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--border-radius-lg);
+  overflow-y: auto;
+  min-height: 0;
+  box-shadow: var(--elevation-1);
+}
+.video-panel {
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--border-radius-lg);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  box-shadow: var(--elevation-2);
+}
+.video-container {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--md-sys-color-surface-container-lowest);
+  min-height: 0;
+  position: relative;
+  margin: 12px;
+  border-radius: var(--border-radius-md);
+  overflow: hidden;
+}
+#video-player {
+  max-width: 100%;
+  max-height: 100%;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+#video-placeholder {
+  position: absolute;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 14px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+#video-placeholder .material-symbols-outlined {
+  font-size: 48px;
+  color: var(--md-sys-color-outline);
+}
+.video-controls {
+  background: var(--md-sys-color-surface-container-high);
+  padding: 12px 20px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  border-radius: 0 0 var(--border-radius-lg) var(--border-radius-lg);
+}
+#video-status {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.control-panel {
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--border-radius-lg);
+  overflow-y: auto;
+  min-height: 0;
+  box-shadow: var(--elevation-1);
+}
+.log-panel {
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--border-radius-lg);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  box-shadow: var(--elevation-1);
+}
+
+/* Command bar - FAB style */
+.command-bar {
+  grid-column: 1 / -1;
+  background: var(--md-sys-color-surface-container-high);
+  border-radius: var(--border-radius-xl);
+  padding: 8px 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: var(--elevation-2);
+}
+.command-bar .material-symbols-outlined {
+  color: var(--md-sys-color-primary);
+  font-size: 24px;
+}
+#cmd {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--md-sys-color-on-surface);
+  font-family: 'Roboto Mono', monospace;
+  font-size: 14px;
+  outline: none;
+}
+#cmd::placeholder {
+  color: var(--md-sys-color-outline);
+}
+
+/* Section headers */
+.section-header {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface-variant);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 16px 16px 8px 16px;
+  padding-bottom: 4px;
+}
+
+/* Node cards - List item style */
+.node-card {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  margin: 4px 8px;
+  border-radius: var(--border-radius-md);
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s ease;
+}
+.node-card:hover {
+  background: rgba(208, 188, 255, 0.08);
+}
+.node-card.selected {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}
+.node-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 16px;
+  background: var(--status-success);
+}
+.node-card.pending .node-dot {
+  background: var(--status-warning);
+}
+.node-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+.no-items {
+  color: var(--md-sys-color-outline);
+  font-size: 14px;
+  padding: 16px;
+  text-align: center;
+}
+
+/* Node search */
+.node-search {
+  padding: 12px 16px;
+}
+.node-search input {
+  width: 100%;
+  background: var(--md-sys-color-surface-container-highest);
+  border: none;
+  color: var(--md-sys-color-on-surface);
+  padding: 12px 16px;
+  font-family: inherit;
+  font-size: 14px;
+  border-radius: var(--border-radius-xl);
+  transition: box-shadow 0.2s;
+}
+.node-search input:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--md-sys-color-primary);
+}
+.node-search input::placeholder {
+  color: var(--md-sys-color-outline);
+}
+.node-name .match {
+  color: var(--md-sys-color-primary);
+  font-weight: 500;
+}
+
+/* Buttons - Material style */
+button {
+  background: transparent;
+  color: var(--md-sys-color-primary);
+  border: none;
+  padding: 10px 24px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: var(--border-radius-xl);
+  transition: all 0.2s ease;
+}
+button:hover {
+  background: rgba(208, 188, 255, 0.08);
+}
+button.filled {
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+}
+button.filled:hover {
+  background: var(--md-sys-color-primary);
+  box-shadow: var(--elevation-1);
+}
+button.tonal {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}
+button.tonal:hover {
+  box-shadow: var(--elevation-1);
+}
+button.outlined {
+  border: 1px solid var(--md-sys-color-outline);
+}
+button.outlined:hover {
+  background: rgba(208, 188, 255, 0.08);
+}
+button.approve {
+  color: var(--status-success);
+}
+button.approve:hover {
+  background: rgba(125, 209, 129, 0.12);
+}
+button.reject {
+  color: var(--status-error);
+}
+button.reject:hover {
+  background: rgba(242, 184, 181, 0.12);
+}
+
+/* Tabs - Navigation rail style */
+.tabs {
+  display: flex;
+  padding: 8px;
+  gap: 4px;
+}
+.tab {
+  flex: 1;
+  padding: 12px 16px;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: var(--border-radius-xl);
+  transition: all 0.2s ease;
+}
+.tab:hover {
+  background: rgba(208, 188, 255, 0.08);
+}
+.tab.active {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* Control sections */
+.control-section {
+  margin-bottom: 20px;
+  padding: 0 16px;
+}
+.control-section h3 {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface-variant);
+  margin-bottom: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.preset-buttons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.preset-buttons button {
+  min-width: 64px;
+  padding: 8px 16px;
+  background: var(--md-sys-color-surface-container-highest);
+  border-radius: var(--border-radius-sm);
+}
+.preset-buttons button:hover {
+  background: var(--md-sys-color-surface-bright);
+}
+.custom-input {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.custom-input input {
+  width: 80px;
+  background: var(--md-sys-color-surface-container-highest);
+  border: none;
+  border-bottom: 2px solid var(--md-sys-color-outline);
+  color: var(--md-sys-color-on-surface);
+  padding: 12px;
+  font-family: 'Roboto Mono', monospace;
+  font-size: 14px;
+  border-radius: var(--border-radius-sm) var(--border-radius-sm) 0 0;
+  transition: border-color 0.2s;
+}
+.custom-input input:focus {
+  outline: none;
+  border-bottom-color: var(--md-sys-color-primary);
+}
+.custom-input span {
+  color: var(--md-sys-color-outline);
+}
+
+/* PTZ Controls */
+.ptz-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+}
+.ptz-settings {
+  display: flex;
+  gap: 24px;
+  width: 100%;
+  justify-content: center;
+}
+.ptz-setting {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ptz-setting label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.ptz-setting select, .ptz-setting input[type="range"] {
+  background: var(--md-sys-color-surface-container-highest);
+  border: none;
+  color: var(--md-sys-color-on-surface);
+  padding: 8px 12px;
+  font-family: inherit;
+  font-size: 14px;
+  border-radius: var(--border-radius-sm);
+}
+.dpad {
+  display: grid;
+  grid-template-columns: repeat(3, 52px);
+  grid-template-rows: repeat(3, 52px);
+  gap: 4px;
+}
+.dpad button {
+  width: 52px;
+  height: 52px;
+  font-size: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  padding: 0;
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
+}
+.dpad button:hover {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}
+.dpad-center {
+  background: var(--md-sys-color-primary) !important;
+  color: var(--md-sys-color-on-primary) !important;
+}
+.zoom-buttons {
+  display: flex;
+  gap: 8px;
+}
+.zoom-buttons button {
+  padding: 12px 24px;
+  font-size: 20px;
+  font-weight: 500;
+  background: var(--md-sys-color-surface-container-highest);
+}
+.ptz-actions {
+  display: flex;
+  gap: 8px;
+}
+.ptz-actions button {
+  background: var(--md-sys-color-surface-container-highest);
+}
+
+/* Recording */
+.quick-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.quick-buttons button {
+  padding: 8px 16px;
+  background: var(--md-sys-color-surface-container-highest);
+  border-radius: var(--border-radius-sm);
+}
+.date-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.date-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.date-row label {
+  width: 48px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.date-row input {
+  flex: 1;
+  background: var(--md-sys-color-surface-container-highest);
+  border: none;
+  border-bottom: 2px solid var(--md-sys-color-outline);
+  color: var(--md-sys-color-on-surface);
+  padding: 12px;
+  font-family: inherit;
+  font-size: 14px;
+  border-radius: var(--border-radius-sm) var(--border-radius-sm) 0 0;
+}
+.date-row input:focus {
+  outline: none;
+  border-bottom-color: var(--md-sys-color-primary);
+}
+.recording-actions {
+  display: flex;
+  gap: 8px;
+}
+.recording-actions button {
+  flex: 1;
+  padding: 12px;
+}
+
+/* Placeholder */
+.placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 120px;
+  color: var(--md-sys-color-outline);
+  font-size: 14px;
+  gap: 8px;
+}
+.placeholder .material-symbols-outlined {
+  font-size: 36px;
+}
+
+/* Log */
+.log-header {
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+  font-weight: 500;
+}
+.log-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.log-controls select {
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
+  border: none;
+  font-size: 14px;
+  padding: 8px 12px;
+  border-radius: var(--border-radius-sm);
+  font-family: inherit;
+}
+#log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-family: 'Roboto Mono', monospace;
+}
+.log-line {
+  padding: 6px 12px;
+  margin: 2px 0;
+  border-radius: var(--border-radius-sm);
+}
+.log-line:hover {
+  background: rgba(208, 188, 255, 0.08);
+}
+.pending { color: var(--status-warning); background: rgba(255, 185, 81, 0.08); }
+.approved { color: var(--status-success); background: rgba(125, 209, 129, 0.08); }
+.rejected { color: var(--status-error); background: rgba(242, 184, 181, 0.08); }
+.response { color: var(--status-info); background: rgba(125, 207, 255, 0.08); }
+.command { color: var(--md-sys-color-outline); }
+
+/* Login overlay - Dialog style */
+.login-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.login-box {
+  background: var(--md-sys-color-surface-container-high);
+  padding: 32px;
+  border-radius: var(--border-radius-xl);
+  box-shadow: var(--elevation-3);
+  text-align: center;
+  min-width: 380px;
+}
+.login-box h2 {
+  font-size: 24px;
+  font-weight: 400;
+  margin-bottom: 8px;
+  color: var(--md-sys-color-on-surface);
+}
+.login-box p {
+  color: var(--md-sys-color-on-surface-variant);
+  margin-bottom: 24px;
+  font-size: 14px;
+}
+.login-box input {
+  display: block;
+  width: 100%;
+  margin: 16px 0;
+  padding: 16px;
+  background: var(--md-sys-color-surface-container-highest);
+  border: none;
+  border-bottom: 2px solid var(--md-sys-color-outline);
+  color: var(--md-sys-color-on-surface);
+  font-family: inherit;
+  font-size: 16px;
+  border-radius: var(--border-radius-sm) var(--border-radius-sm) 0 0;
+}
+.login-box input:focus {
+  outline: none;
+  border-bottom-color: var(--md-sys-color-primary);
+}
+.login-box button {
+  width: 100%;
+  margin-top: 24px;
+  padding: 16px;
+  font-size: 14px;
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+}
+.login-error {
+  color: var(--status-error);
+  font-size: 14px;
+  margin-top: 16px;
+  min-height: 20px;
+}
+.logout-btn {
+  background: transparent;
+  color: var(--md-sys-color-primary);
+  padding: 8px 16px;
+  font-size: 14px;
+  cursor: pointer;
+  text-decoration: none;
+  border-radius: var(--border-radius-xl);
+}
+.logout-btn:hover {
+  background: rgba(208, 188, 255, 0.08);
+}
+</style>
+</head>
+<body>
+<!-- Login Overlay -->
+<div id="login-overlay" class="login-overlay">
+  <div class="login-box">
+    <h2>Welcome back</h2>
+    <p>Sign in to SlingShot Admin</p>
+    <input type="text" id="login-username" placeholder="Username" value="admin">
+    <input type="text" id="login-totp" placeholder="Verification code" maxlength="6" onkeydown="if(event.key==='Enter')login()" autocomplete="off">
+    <button class="filled" onclick="login()">Sign in</button>
+    <div id="login-error" class="login-error"></div>
+  </div>
+</div>
+
+<div class="app">
+  <header class="header">
+    <h1>
+      <span class="material-symbols-outlined">videocam</span>
+      SlingShot Admin
+    </h1>
+    <div class="status">
+      <div class="status-chip">
+        <div class="status-dot" id="status-dot"></div>
+        <span id="status-text">Disconnected</span>
+      </div>
+      <a href="/admin" id="admin-link" class="logout-btn" style="display:none">Users</a>
+      <button id="logout-btn" class="logout-btn" onclick="logout()" style="display:none">Sign out</button>
+    </div>
+  </header>
+
+  <aside class="nodes-panel">
+    <div class="node-search">
+      <input type="text" id="node-search" placeholder="Search nodes" oninput="filterNodes()">
+    </div>
+    <div class="section-header">Connected</div>
+    <div id="connected-nodes"><div class="no-items">No nodes connected</div></div>
+    <div class="section-header">Pending</div>
+    <div id="pending-nodes"><div class="no-items">No pending nodes</div></div>
+  </aside>
+
+  <main class="video-panel">
+    <div class="video-container">
+      <video id="video-player" playsinline muted></video>
+      <div id="video-placeholder">
+        <span class="material-symbols-outlined">play_circle</span>
+        Select a node to view stream
+      </div>
+    </div>
+    <div class="video-controls">
+      <span id="video-status"></span>
+    </div>
+  </main>
+
+  <aside class="control-panel">
+    <div class="tabs">
+      <button class="tab active" data-tab="stream">Stream</button>
+      <button class="tab" data-tab="ptz">PTZ</button>
+      <button class="tab" data-tab="recording">Recording</button>
+    </div>
+    <div id="no-node-selected" class="placeholder">
+      <span class="material-symbols-outlined">tune</span>
+      Select a node to control
+    </div>
+    <div id="control-content" style="display:none">
+      <!-- Stream Tab -->
+      <div id="tab-stream" class="tab-content active">
+        <div class="control-section">
+          <h3>Resolution</h3>
+          <div class="preset-buttons">
+            <button onclick="setResolution(1920, 1080)">1080p</button>
+            <button onclick="setResolution(1280, 720)">720p</button>
+            <button onclick="setResolution(854, 480)">480p</button>
+            <button onclick="setResolution(640, 360)">360p</button>
+          </div>
+          <div class="custom-input">
+            <input type="number" id="res-w" placeholder="W" value="1280">
+            <span>x</span>
+            <input type="number" id="res-h" placeholder="H" value="720">
+            <button class="tonal" onclick="setCustomResolution()">Set</button>
+          </div>
+        </div>
+        <div class="control-section">
+          <h3>Bitrate (kbps)</h3>
+          <div class="custom-input">
+            <input type="number" id="bitrate" placeholder="kbps" value="2000" min="100" max="20000" style="width:100px">
+            <button class="tonal" onclick="setBitrate()">Set</button>
+          </div>
+        </div>
+        <div class="control-section">
+          <h3>Frame Rate</h3>
+          <div class="preset-buttons">
+            <button onclick="setFps(30)">30 fps</button>
+            <button onclick="setFps(25)">25 fps</button>
+            <button onclick="setFps(15)">15 fps</button>
+            <button onclick="setFps(10)">10 fps</button>
+          </div>
+        </div>
+        <div style="padding: 0 16px;">
+          <button class="tonal" onclick="getParams()" style="width:100%;margin-top:12px">Refresh</button>
+          <button class="outlined" onclick="restartPipeline()" style="width:100%;margin-top:8px;color:var(--status-warning)">Restart Pipeline</button>
+        </div>
+      </div>
+
+      <!-- PTZ Tab -->
+      <div id="tab-ptz" class="tab-content">
+        <div class="ptz-container">
+          <div class="ptz-settings">
+            <div class="ptz-setting">
+              <label>Speed</label>
+              <input type="range" id="ptz-speed" min="0.1" max="1" step="0.1" value="0.5" style="width:80px">
+            </div>
+            <div class="ptz-setting">
+              <label>Duration</label>
+              <select id="ptz-duration">
+                <option value="0">Hold</option>
+                <option value="250">250ms</option>
+                <option value="500" selected>500ms</option>
+                <option value="1000">1s</option>
+              </select>
+            </div>
+          </div>
+          <div class="dpad">
+            <div></div>
+            <button onmousedown="ptzMove('up')" onmouseup="ptzStop()" onmouseleave="ptzStop()">&#9650;</button>
+            <div></div>
+            <button onmousedown="ptzMove('left')" onmouseup="ptzStop()" onmouseleave="ptzStop()">&#9664;</button>
+            <button class="dpad-center" onclick="ptzHome()">&#8962;</button>
+            <button onmousedown="ptzMove('right')" onmouseup="ptzStop()" onmouseleave="ptzStop()">&#9654;</button>
+            <div></div>
+            <button onmousedown="ptzMove('down')" onmouseup="ptzStop()" onmouseleave="ptzStop()">&#9660;</button>
+            <div></div>
+          </div>
+          <div class="zoom-buttons">
+            <button onmousedown="ptzMove('zoomout')" onmouseup="ptzStop()" onmouseleave="ptzStop()">-</button>
+            <button onmousedown="ptzMove('zoomin')" onmouseup="ptzStop()" onmouseleave="ptzStop()">+</button>
+          </div>
+          <div class="ptz-actions">
+            <button onclick="ptzStop()">Stop</button>
+            <button onclick="ptzStatus()">Status</button>
+            <button onclick="ptzInfo()">Info</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recording Tab -->
+      <div id="tab-recording" class="tab-content">
+        <div class="control-section">
+          <h3>Quick Download</h3>
+          <div class="quick-buttons">
+            <button onclick="downloadRecordingsQuick('5 mins ago')">5m</button>
+            <button onclick="downloadRecordingsQuick('15 mins ago')">15m</button>
+            <button onclick="downloadRecordingsQuick('last hour')">1h</button>
+            <button onclick="downloadRecordingsQuick('2 hours ago')">2h</button>
+            <button onclick="downloadRecordingsQuick('since midnight')">Today</button>
+          </div>
+        </div>
+        <div class="control-section">
+          <h3>Custom Range</h3>
+          <div class="date-inputs">
+            <div class="date-row">
+              <label>From</label>
+              <input type="datetime-local" id="rec-from">
+            </div>
+            <div class="date-row">
+              <label>To</label>
+              <input type="datetime-local" id="rec-to">
+            </div>
+          </div>
+          <div class="recording-actions">
+            <button class="filled" onclick="getCustomRecordings()">Download</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <aside class="log-panel">
+    <div class="log-header">
+      <span>Activity</span>
+      <div class="log-controls">
+        <select id="log-filter">
+          <option value="all">All</option>
+          <option value="approval">Approvals</option>
+          <option value="command">Commands</option>
+          <option value="response">Responses</option>
+        </select>
+        <button onclick="clearLog()">Clear</button>
+      </div>
+    </div>
+    <div id="log"></div>
+  </aside>
+
+  <div class="command-bar">
+    <span class="material-symbols-outlined">terminal</span>
+    <input id="cmd" placeholder="Enter command..." autofocus>
+  </div>
+</div>
+
+<script>
+// State
+let ws = null;
+let selectedNode = null;
+let connectedNodes = new Map();
+let pendingNodes = new Map();
+let commandHistory = [];
+let historyIndex = -1;
+let ptzContinuous = false;
+let nodeSearchQuery = '';
+
+function fuzzyMatch(pattern, str) {
+  pattern = pattern.toLowerCase();
+  str = str.toLowerCase();
+  if (pattern.length === 0) return { score: 1, matches: [] };
+  if (pattern.length > str.length) return { score: -1, matches: [] };
+  const exactIdx = str.indexOf(pattern);
+  if (exactIdx !== -1) {
+    const matches = [];
+    for (let i = 0; i < pattern.length; i++) matches.push(exactIdx + i);
+    return { score: 100 + (str.length - pattern.length), matches };
+  }
+  let patternIdx = 0, score = 0, lastMatchIdx = -1;
+  const matches = [];
+  for (let i = 0; i < str.length && patternIdx < pattern.length; i++) {
+    if (str[i] === pattern[patternIdx]) {
+      matches.push(i);
+      if (lastMatchIdx === i - 1) score += 10;
+      if (i === 0 || str[i-1] === '-' || str[i-1] === '_' || str[i-1] === ' ') score += 5;
+      score += 1;
+      lastMatchIdx = i;
+      patternIdx++;
+    }
+  }
+  if (patternIdx !== pattern.length) return { score: -1, matches: [] };
+  return { score, matches };
+}
+
+function filterNodes() {
+  nodeSearchQuery = document.getElementById('node-search').value;
+  updateNodeList();
+  updatePendingList();
+}
+
+function highlightMatches(name, matches) {
+  if (matches.length === 0) return document.createTextNode(name);
+  const span = document.createElement('span');
+  span.className = 'node-name';
+  let lastIdx = 0;
+  for (const matchIdx of matches) {
+    if (matchIdx > lastIdx) span.appendChild(document.createTextNode(name.slice(lastIdx, matchIdx)));
+    const highlight = document.createElement('span');
+    highlight.className = 'match';
+    highlight.textContent = name[matchIdx];
+    span.appendChild(highlight);
+    lastIdx = matchIdx + 1;
+  }
+  if (lastIdx < name.length) span.appendChild(document.createTextNode(name.slice(lastIdx)));
+  return span;
+}
+
+let sessionToken = localStorage.getItem('admin_session');
+let pendingCredentials = null;
+let userRole = null;
+let hls = null;
+const video = document.getElementById('video-player');
+const videoPlaceholder = document.getElementById('video-placeholder');
+const videoStatus = document.getElementById('video-status');
+const log = document.getElementById('log');
+const cmd = document.getElementById('cmd');
+const statusDot = document.getElementById('status-dot');
+const statusText = document.getElementById('status-text');
+const loginOverlay = document.getElementById('login-overlay');
+const loginError = document.getElementById('login-error');
+const logoutBtn = document.getElementById('logout-btn');
+const adminLink = document.getElementById('admin-link');
+
+initHls();
+setupTabs();
+if (sessionToken) connectWebSocket();
+
+function initHls() {
+  if (Hls.isSupported()) {
+    hls = new Hls({ liveSyncDuration: 3, liveMaxLatencyDuration: 10, enableWorker: true, lowLatencyMode: true });
+    hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(() => {}); videoStatus.textContent = 'Playing'; });
+    hls.on(Hls.Events.ERROR, (event, data) => {
+      if (data.fatal) {
+        videoStatus.textContent = 'Error';
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) setTimeout(() => { if (hls) hls.startLoad(); }, 3000);
+      }
+    });
+    hls.on(Hls.Events.FRAG_BUFFERED, () => { videoStatus.textContent = 'Playing'; });
+  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.addEventListener('loadedmetadata', () => video.play());
+  }
+}
+
+function playLive(nodeName) {
+  if (!nodeName) return;
+  videoPlaceholder.style.display = 'none';
+  video.style.display = 'block';
+  videoStatus.textContent = 'Connecting...';
+  const url = `/hls/${nodeName}/stream.m3u8`;
+  if (hls) hls.loadSource(url); else video.src = url;
+}
+
+function stopVideo() {
+  if (hls) hls.stopLoad();
+  video.style.display = 'none';
+  videoPlaceholder.style.display = 'flex';
+  videoStatus.textContent = '';
+}
+
+function downloadRecordingsQuick(timeSpec) {
+  if (!selectedNode) return;
+  const now = new Date();
+  let from;
+  if (timeSpec === '5 mins ago') from = new Date(now - 5 * 60 * 1000);
+  else if (timeSpec === '15 mins ago') from = new Date(now - 15 * 60 * 1000);
+  else if (timeSpec === 'last hour') from = new Date(now - 60 * 60 * 1000);
+  else if (timeSpec === '2 hours ago') from = new Date(now - 2 * 60 * 60 * 1000);
+  else if (timeSpec === 'since midnight') { from = new Date(now); from.setHours(0, 0, 0, 0); }
+  else from = new Date(now - 5 * 60 * 1000);
+  sendCommand(`${selectedNode} recordings ${from.toISOString()} ${now.toISOString()}`);
+}
+
+function login() {
+  const username = document.getElementById('login-username').value;
+  const code = document.getElementById('login-totp').value;
+  if (!username || !code) { loginError.textContent = 'Please enter username and code'; return; }
+  if (code.length !== 6 || !/^\d+$/.test(code)) { loginError.textContent = 'Code must be 6 digits'; return; }
+  loginError.textContent = '';
+  pendingCredentials = { username, code };
+  connectWebSocket();
+}
+
+function logout() {
+  localStorage.removeItem('admin_session');
+  sessionToken = null;
+  userRole = null;
+  if (ws) ws.close();
+  location.reload();
+}
+
+function connectWebSocket() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => {
+    if (sessionToken) ws.send(`TOKEN|${sessionToken}`);
+    else if (pendingCredentials) { ws.send(`TOTP|${pendingCredentials.username}|${pendingCredentials.code}`); pendingCredentials = null; }
+  };
+  ws.onclose = () => {
+    statusDot.classList.remove('connected');
+    statusText.textContent = 'Disconnected';
+    if (sessionToken) { append('Reconnecting...', 'system'); setTimeout(connectWebSocket, 3000); }
+  };
+  ws.onerror = () => append('Connection error', 'error');
+  ws.onmessage = handleMessage;
+}
+
+function handleMessage(e) {
+  const msg = e.data;
+  if (msg.startsWith('AUTH_OK|')) {
+    const parts = msg.split('|');
+    const token = parts[1], role = parts[2] || 'user';
+    if (token) { sessionToken = token; localStorage.setItem('admin_session', token); }
+    userRole = role;
+    loginOverlay.style.display = 'none';
+    logoutBtn.style.display = 'block';
+    if (role === 'admin') adminLink.style.display = 'block';
+    statusDot.classList.add('connected');
+    statusText.textContent = 'Connected';
+    append('Authenticated as ' + role, 'system');
+    ws.send('nodes');
+    return;
+  } else if (msg === 'AUTH_FAILED') {
+    localStorage.removeItem('admin_session');
+    sessionToken = null; userRole = null;
+    loginOverlay.style.display = 'flex';
+    logoutBtn.style.display = 'none';
+    adminLink.style.display = 'none';
+    loginError.textContent = 'Invalid credentials';
+    if (ws) ws.close();
+    return;
+  }
+  if (msg.startsWith('PENDING|')) {
+    const [_, name, fp, addr] = msg.split('|');
+    pendingNodes.set(name, { fingerprint: fp, address: addr });
+    updatePendingList();
+    append(`Pending: ${name} (${fp}) from ${addr}`, 'pending');
+  } else if (msg.startsWith('APPROVED|')) {
+    const name = msg.split('|')[1];
+    pendingNodes.delete(name);
+    updatePendingList();
+    append(`Approved: ${name}`, 'approved');
+  } else if (msg.startsWith('REJECTED|')) {
+    const name = msg.split('|')[1];
+    pendingNodes.delete(name);
+    updatePendingList();
+    append(`Rejected: ${name}`, 'rejected');
+  } else if (msg.startsWith('CONNECTED|')) {
+    const name = msg.split('|')[1];
+    connectedNodes.set(name, { status: 'connected' });
+    updateNodeList();
+    append(`Connected: ${name}`, 'approved');
+  } else if (msg.startsWith('DISCONNECTED|')) {
+    const name = msg.split('|')[1];
+    connectedNodes.delete(name);
+    if (selectedNode === name) { selectedNode = null; updateControlPanel(); stopVideo(); }
+    updateNodeList();
+    append(`Disconnected: ${name}`, 'rejected');
+  } else if (msg.startsWith('Connected nodes:')) {
+    parseNodesList(msg);
+  } else if (msg.startsWith('[')) {
+    append(msg, 'response');
+  } else {
+    append(msg);
+  }
+}
+
+function parseNodesList(msg) {
+  const lines = msg.split('\n');
+  connectedNodes.clear();
+  for (const line of lines) {
+    const match = line.match(/^\s+(\S+)\s+-\s+/);
+    if (match) connectedNodes.set(match[1], { status: 'connected' });
+  }
+  updateNodeList();
+}
+
+function sendCommand(cmdStr) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    append('> ' + cmdStr, 'command');
+    ws.send(cmdStr);
+    commandHistory.push(cmdStr);
+    historyIndex = commandHistory.length;
+  }
+}
+
+function selectNode(name) {
+  selectedNode = name;
+  updateNodeList();
+  updateControlPanel();
+  sendCommand(`${name} params`);
+  playLive(name);
+}
+
+function approveNode(name) { sendCommand(`approve ${name}`); }
+function rejectNode(name) { sendCommand(`reject ${name}`); }
+
+function updateNodeList() {
+  const container = document.getElementById('connected-nodes');
+  if (connectedNodes.size === 0) { container.innerHTML = '<div class="no-items">No nodes connected</div>'; return; }
+  const filteredNodes = [];
+  connectedNodes.forEach((info, name) => {
+    const result = fuzzyMatch(nodeSearchQuery, name);
+    if (result.score >= 0) filteredNodes.push({ name, info, score: result.score, matches: result.matches });
+  });
+  filteredNodes.sort((a, b) => b.score - a.score);
+  container.innerHTML = '';
+  if (filteredNodes.length === 0) { container.innerHTML = '<div class="no-items">No matching nodes</div>'; return; }
+  filteredNodes.forEach(({ name, matches }) => {
+    const card = document.createElement('div');
+    card.className = 'node-card' + (selectedNode === name ? ' selected' : '');
+    const dot = document.createElement('div');
+    dot.className = 'node-dot';
+    card.appendChild(dot);
+    card.appendChild(highlightMatches(name, matches));
+    card.onclick = () => selectNode(name);
+    container.appendChild(card);
+  });
+}
+
+function updatePendingList() {
+  const container = document.getElementById('pending-nodes');
+  if (pendingNodes.size === 0) { container.innerHTML = '<div class="no-items">No pending nodes</div>'; return; }
+  const filteredNodes = [];
+  pendingNodes.forEach((info, name) => {
+    const result = fuzzyMatch(nodeSearchQuery, name);
+    if (result.score >= 0) filteredNodes.push({ name, info, score: result.score, matches: result.matches });
+  });
+  filteredNodes.sort((a, b) => b.score - a.score);
+  container.innerHTML = '';
+  if (filteredNodes.length === 0) { container.innerHTML = '<div class="no-items">No matching nodes</div>'; return; }
+  filteredNodes.forEach(({ name, matches }) => {
+    const card = document.createElement('div');
+    card.className = 'node-card pending';
+    const dot = document.createElement('div');
+    dot.className = 'node-dot';
+    const actions = document.createElement('div');
+    actions.className = 'node-actions';
+    const approveBtn = document.createElement('button');
+    approveBtn.className = 'approve';
+    approveBtn.textContent = 'Approve';
+    approveBtn.onclick = (e) => { e.stopPropagation(); approveNode(name); };
+    const rejectBtn = document.createElement('button');
+    rejectBtn.className = 'reject';
+    rejectBtn.textContent = 'Reject';
+    rejectBtn.onclick = (e) => { e.stopPropagation(); rejectNode(name); };
+    actions.appendChild(approveBtn);
+    actions.appendChild(rejectBtn);
+    card.appendChild(dot);
+    card.appendChild(highlightMatches(name, matches));
+    card.appendChild(actions);
+    container.appendChild(card);
+  });
+}
+
+function updateControlPanel() {
+  const content = document.getElementById('control-content');
+  const placeholder = document.getElementById('no-node-selected');
+  if (selectedNode) { content.style.display = 'block'; placeholder.style.display = 'none'; }
+  else { content.style.display = 'none'; placeholder.style.display = 'flex'; }
+}
+
+function setupTabs() {
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.onclick = () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+    };
+  });
+}
+
+function setResolution(w, h) { if (selectedNode) sendCommand(`${selectedNode} res ${w} ${h}`); }
+function setCustomResolution() {
+  const w = document.getElementById('res-w').value, h = document.getElementById('res-h').value;
+  if (selectedNode && w && h) sendCommand(`${selectedNode} res ${w} ${h}`);
+}
+function setBitrate() { const bitrate = document.getElementById('bitrate').value; if (selectedNode && bitrate) sendCommand(`${selectedNode} bitrate ${bitrate}`); }
+function setFps(rate) { if (selectedNode) sendCommand(`${selectedNode} fps ${rate}`); }
+function getParams() { if (selectedNode) sendCommand(`${selectedNode} params`); }
+function restartPipeline() { if (selectedNode) sendCommand(`${selectedNode} restart`); }
+
+function ptzMove(direction) {
+  if (!selectedNode) return;
+  const speed = document.getElementById('ptz-speed').value, duration = document.getElementById('ptz-duration').value;
+  if (duration === '0') { ptzContinuous = true; sendCommand(`${selectedNode} ${direction} ${speed}`); }
+  else sendCommand(`${selectedNode} ${direction} ${speed} ${duration}`);
+}
+function ptzStop() { if (ptzContinuous && selectedNode) { sendCommand(`${selectedNode} stop`); ptzContinuous = false; } }
+function ptzHome() { if (selectedNode) sendCommand(`${selectedNode} home`); }
+function ptzStatus() { if (selectedNode) sendCommand(`${selectedNode} status`); }
+function ptzInfo() { if (selectedNode) sendCommand(`${selectedNode} info`); }
+
+function getRecordings(timeSpec) { if (selectedNode) sendCommand(`${selectedNode} recordings ${timeSpec}`); }
+function getCustomRecordings() {
+  const from = document.getElementById('rec-from').value, to = document.getElementById('rec-to').value;
+  if (selectedNode && from && to) sendCommand(`${selectedNode} recordings ${new Date(from).toISOString()} ${new Date(to).toISOString()}`);
+}
+
+function append(text, cls) {
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  line.textContent = text;
+  if (cls) line.classList.add(cls);
+  line.dataset.type = getMessageType(text, cls);
+  log.appendChild(line);
+  applyFilter(line);
+  log.scrollTop = log.scrollHeight;
+}
+
+function getMessageType(text, cls) {
+  if (cls === 'pending' || cls === 'approved' || cls === 'rejected') return 'approval';
+  if (cls === 'command') return 'command';
+  if (cls === 'response') return 'response';
+  return 'info';
+}
+
+function applyFilter(line) {
+  const filter = document.getElementById('log-filter').value;
+  line.style.display = (filter === 'all' || line.dataset.type === filter) ? '' : 'none';
+}
+
+document.getElementById('log-filter').onchange = () => { document.querySelectorAll('.log-line').forEach(applyFilter); };
+function clearLog() { log.innerHTML = ''; }
+
+cmd.onkeydown = (e) => {
+  if (e.key === 'Enter' && cmd.value.trim()) { sendCommand(cmd.value.trim()); cmd.value = ''; }
+  else if (e.key === 'ArrowUp') { if (historyIndex > 0) { historyIndex--; cmd.value = commandHistory[historyIndex]; } e.preventDefault(); }
+  else if (e.key === 'ArrowDown') { if (historyIndex < commandHistory.length - 1) { historyIndex++; cmd.value = commandHistory[historyIndex]; } else { historyIndex = commandHistory.length; cmd.value = ''; } e.preventDefault(); }
+};
+</script>
+</body>
+</html>

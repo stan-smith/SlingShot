@@ -1,0 +1,1404 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>SlingShot Admin</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.4.14/dist/hls.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/*
+ * DESIGN 2: INDUSTRIAL OPERATIONS
+ *
+ * A control room / operations center aesthetic featuring:
+ * - High contrast dark theme optimized for 24/7 monitoring
+ * - Amber/orange accent colors (safety/warning palette)
+ * - Data-dense dashboard layout
+ * - Industrial monospace typography
+ * - Strong grid lines and clear visual hierarchy
+ * - Status indicators and readouts
+ */
+
+:root {
+  /* Deep industrial darks */
+  --bg-primary: #0a0a0c;
+  --bg-secondary: #12141a;
+  --bg-tertiary: #1a1d26;
+  --bg-panel: #0f1116;
+
+  /* Amber/Orange industrial palette */
+  --accent-primary: #f59e0b;
+  --accent-primary-dim: #b45309;
+  --accent-primary-glow: rgba(245, 158, 11, 0.15);
+  --accent-secondary: #06b6d4;
+
+  /* Text - high contrast for readability */
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --text-dim: #475569;
+
+  /* Status colors - industrial safety palette */
+  --status-online: #22c55e;
+  --status-warning: #f59e0b;
+  --status-error: #ef4444;
+  --status-info: #06b6d4;
+
+  /* Grid and borders */
+  --border-color: #1e293b;
+  --grid-color: #334155;
+  --border-radius: 4px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* Scanline effect overlay */
+body::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.03) 2px,
+    rgba(0, 0, 0, 0.03) 4px
+  );
+  z-index: 10000;
+}
+
+.app {
+  display: grid;
+  grid-template-rows: 48px minmax(0, 1fr) 40px;
+  grid-template-columns: 200px 1fr 260px 280px;
+  height: 100vh;
+  max-height: 100vh;
+  gap: 2px;
+  background: var(--grid-color);
+  padding: 2px;
+}
+
+/* Header - Industrial control bar */
+.header {
+  grid-column: 1 / -1;
+  background: linear-gradient(180deg, var(--bg-tertiary), var(--bg-secondary));
+  border-bottom: 2px solid var(--accent-primary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+}
+.header h1 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.header h1::before {
+  content: '//';
+  color: var(--text-muted);
+}
+.status {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+}
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--status-error);
+  box-shadow: 0 0 8px var(--status-error);
+}
+.status-dot.connected {
+  background: var(--status-online);
+  box-shadow: 0 0 8px var(--status-online);
+  animation: blink 2s infinite;
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+/* Panels - Industrial frames */
+.nodes-panel {
+  background: var(--bg-secondary);
+  overflow-y: auto;
+  min-height: 0;
+  border: 1px solid var(--border-color);
+}
+.panel-header {
+  background: var(--bg-tertiary);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.panel-header .count {
+  background: var(--accent-primary-glow);
+  color: var(--accent-primary);
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-size: 10px;
+}
+.panel-content {
+  padding: 8px;
+}
+
+.video-panel {
+  background: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  position: relative;
+}
+.video-panel::before {
+  content: 'LIVE FEED';
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  z-index: 10;
+}
+.video-container {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  min-height: 0;
+  position: relative;
+  margin: 4px;
+  border: 1px solid var(--border-color);
+}
+/* Corner brackets for video */
+.video-container::before,
+.video-container::after {
+  content: '';
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--accent-primary);
+  z-index: 5;
+}
+.video-container::before {
+  top: 8px;
+  left: 8px;
+  border-right: none;
+  border-bottom: none;
+}
+.video-container::after {
+  bottom: 8px;
+  right: 8px;
+  border-left: none;
+  border-top: none;
+}
+#video-player {
+  max-width: 100%;
+  max-height: 100%;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+#video-placeholder {
+  position: absolute;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.video-controls {
+  background: var(--bg-tertiary);
+  padding: 6px 12px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 10px;
+}
+#video-status {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--status-online);
+  text-transform: uppercase;
+}
+
+.control-panel {
+  background: var(--bg-secondary);
+  overflow-y: auto;
+  min-height: 0;
+  border: 1px solid var(--border-color);
+}
+.log-panel {
+  background: var(--bg-secondary);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+}
+
+/* Command bar - Terminal style */
+.command-bar {
+  grid-column: 1 / -1;
+  background: var(--bg-panel);
+  border-top: 2px solid var(--accent-primary);
+  padding: 6px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.command-bar span {
+  color: var(--accent-primary);
+  font-weight: 600;
+}
+#cmd {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+  caret-color: var(--accent-primary);
+}
+#cmd::placeholder {
+  color: var(--text-dim);
+}
+
+/* Section headers */
+.section-header {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin: 12px 0 8px 0;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--border-color);
+}
+
+/* Node cards - Industrial tiles */
+.node-card {
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  margin: 4px 0;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-left: 3px solid var(--status-online);
+  cursor: pointer;
+  font-size: 11px;
+  transition: all 0.1s ease;
+}
+.node-card:hover {
+  background: var(--accent-primary-glow);
+  border-color: var(--accent-primary);
+}
+.node-card.selected {
+  background: var(--accent-primary-glow);
+  border-color: var(--accent-primary);
+  border-left-color: var(--accent-primary);
+}
+.node-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 10px;
+  background: var(--status-online);
+  box-shadow: 0 0 6px var(--status-online);
+}
+.node-card.pending {
+  border-left-color: var(--status-warning);
+}
+.node-card.pending .node-dot {
+  background: var(--status-warning);
+  box-shadow: 0 0 6px var(--status-warning);
+}
+.node-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+.no-items {
+  color: var(--text-dim);
+  font-size: 10px;
+  padding: 12px 8px;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Node search */
+.node-search {
+  padding: 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+.node-search input {
+  width: 100%;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 6px 10px;
+  font-family: inherit;
+  font-size: 11px;
+  border-radius: var(--border-radius);
+}
+.node-search input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px var(--accent-primary-glow);
+}
+.node-search input::placeholder {
+  color: var(--text-dim);
+  text-transform: uppercase;
+  font-size: 9px;
+}
+.node-name .match {
+  color: var(--accent-primary);
+  font-weight: 600;
+}
+
+/* Buttons - Industrial style */
+button {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  padding: 6px 12px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-radius: var(--border-radius);
+  transition: all 0.1s ease;
+}
+button:hover {
+  background: var(--accent-primary-glow);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+button:active {
+  transform: scale(0.98);
+}
+button.primary {
+  background: var(--accent-primary);
+  color: #000;
+  border-color: var(--accent-primary);
+  font-weight: 600;
+}
+button.primary:hover {
+  background: var(--accent-primary-dim);
+}
+button.approve {
+  background: transparent;
+  border-color: var(--status-online);
+  color: var(--status-online);
+}
+button.approve:hover {
+  background: rgba(34, 197, 94, 0.15);
+}
+button.reject {
+  background: transparent;
+  border-color: var(--status-error);
+  color: var(--status-error);
+}
+button.reject:hover {
+  background: rgba(239, 68, 68, 0.15);
+}
+
+/* Tabs - Industrial selector */
+.tabs {
+  display: flex;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-color);
+}
+.tab {
+  flex: 1;
+  padding: 10px 8px;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+}
+.tab:hover {
+  color: var(--text-secondary);
+  background: var(--accent-primary-glow);
+}
+.tab.active {
+  color: var(--accent-primary);
+  border-bottom-color: var(--accent-primary);
+  background: var(--bg-panel);
+}
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* Control sections */
+.control-section {
+  margin-bottom: 16px;
+  padding: 0 12px;
+}
+.control-section h3 {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.control-section h3::before {
+  content: '>';
+  color: var(--accent-primary);
+}
+.preset-buttons {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.preset-buttons button {
+  padding: 8px 6px;
+}
+.custom-input {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.custom-input input {
+  width: 60px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 11px;
+  border-radius: var(--border-radius);
+}
+.custom-input input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+.custom-input span {
+  color: var(--text-muted);
+}
+
+/* PTZ Controls - Industrial joystick style */
+.ptz-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+}
+.ptz-settings {
+  display: flex;
+  gap: 16px;
+  width: 100%;
+  justify-content: center;
+}
+.ptz-setting {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ptz-setting label {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.ptz-setting select, .ptz-setting input[type="range"] {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: 10px;
+  border-radius: var(--border-radius);
+}
+.dpad {
+  display: grid;
+  grid-template-columns: repeat(3, 44px);
+  grid-template-rows: repeat(3, 44px);
+  gap: 3px;
+  background: var(--bg-panel);
+  padding: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 50%;
+}
+.dpad button {
+  width: 44px;
+  height: 44px;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--border-radius);
+  padding: 0;
+}
+.dpad button:hover {
+  background: var(--accent-primary);
+  color: #000;
+  border-color: var(--accent-primary);
+}
+.dpad-center {
+  background: var(--accent-primary) !important;
+  color: #000 !important;
+  border-color: var(--accent-primary) !important;
+  border-radius: 50% !important;
+}
+.zoom-buttons {
+  display: flex;
+  gap: 6px;
+}
+.zoom-buttons button {
+  padding: 8px 16px;
+  font-size: 16px;
+  font-weight: 600;
+}
+.ptz-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* Recording */
+.quick-buttons {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.quick-buttons button {
+  padding: 8px 6px;
+}
+.date-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.date-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.date-row label {
+  width: 40px;
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+.date-row input {
+  flex: 1;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 10px;
+  border-radius: var(--border-radius);
+}
+.recording-actions {
+  display: flex;
+  gap: 6px;
+}
+.recording-actions button {
+  flex: 1;
+  padding: 8px;
+}
+
+/* Placeholder */
+.placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100px;
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  border: 1px dashed var(--border-color);
+  margin: 12px;
+}
+
+/* Log - Industrial readout */
+.log-header {
+  background: var(--bg-tertiary);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+}
+.log-controls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.log-controls select {
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  font-size: 9px;
+  padding: 3px 6px;
+  border-radius: var(--border-radius);
+  font-family: inherit;
+}
+#log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-size: 10px;
+  background: var(--bg-panel);
+}
+.log-line {
+  padding: 3px 0;
+  border-left: 2px solid transparent;
+  padding-left: 8px;
+  margin-left: -8px;
+}
+.log-line:hover {
+  background: var(--accent-primary-glow);
+}
+.pending {
+  color: var(--status-warning);
+  border-left-color: var(--status-warning);
+}
+.approved {
+  color: var(--status-online);
+  border-left-color: var(--status-online);
+}
+.rejected {
+  color: var(--status-error);
+  border-left-color: var(--status-error);
+}
+.response {
+  color: var(--status-info);
+  border-left-color: var(--status-info);
+}
+.command {
+  color: var(--text-muted);
+  border-left-color: var(--text-dim);
+}
+
+/* Login overlay - Industrial access */
+.login-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.95);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.login-box {
+  background: var(--bg-secondary);
+  padding: 32px;
+  border: 2px solid var(--accent-primary);
+  text-align: center;
+  min-width: 320px;
+  position: relative;
+}
+.login-box::before {
+  content: '[ SECURE ACCESS ]';
+  position: absolute;
+  top: -10px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-secondary);
+  padding: 0 12px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent-primary);
+}
+.login-box h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 24px;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.login-box input {
+  display: block;
+  width: 100%;
+  margin: 10px 0;
+  padding: 10px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  border-radius: var(--border-radius);
+}
+.login-box input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+.login-box button {
+  width: 100%;
+  margin-top: 16px;
+  padding: 12px;
+  font-size: 12px;
+  background: var(--accent-primary);
+  color: #000;
+  border: none;
+  font-weight: 600;
+}
+.login-error {
+  color: var(--status-error);
+  font-size: 11px;
+  margin-top: 12px;
+  min-height: 16px;
+}
+.logout-btn {
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  padding: 4px 12px;
+  font-size: 10px;
+  cursor: pointer;
+  text-decoration: none;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.logout-btn:hover {
+  border-color: var(--status-error);
+  color: var(--status-error);
+}
+</style>
+</head>
+<body>
+<!-- Login Overlay -->
+<div id="login-overlay" class="login-overlay">
+  <div class="login-box">
+    <h2>SlingShot Admin</h2>
+    <input type="text" id="login-username" placeholder="OPERATOR ID" value="admin">
+    <input type="text" id="login-totp" placeholder="ACCESS CODE" maxlength="6" onkeydown="if(event.key==='Enter')login()" autocomplete="off">
+    <button onclick="login()">AUTHENTICATE</button>
+    <div id="login-error" class="login-error"></div>
+  </div>
+</div>
+
+<div class="app">
+  <header class="header">
+    <h1>SlingShot Control</h1>
+    <div class="status">
+      <div class="status-indicator">
+        <div class="status-dot" id="status-dot"></div>
+        <span id="status-text">OFFLINE</span>
+      </div>
+      <a href="/admin" id="admin-link" class="logout-btn" style="display:none">USERS</a>
+      <button id="logout-btn" class="logout-btn" onclick="logout()" style="display:none">LOGOUT</button>
+    </div>
+  </header>
+
+  <aside class="nodes-panel">
+    <div class="node-search">
+      <input type="text" id="node-search" placeholder="FILTER NODES..." oninput="filterNodes()">
+    </div>
+    <div class="panel-content">
+      <div class="section-header">Active Nodes</div>
+      <div id="connected-nodes"><div class="no-items">No nodes online</div></div>
+      <div class="section-header">Pending Auth</div>
+      <div id="pending-nodes"><div class="no-items">No pending nodes</div></div>
+    </div>
+  </aside>
+
+  <main class="video-panel">
+    <div class="video-container">
+      <video id="video-player" playsinline muted></video>
+      <div id="video-placeholder">// SELECT NODE FOR FEED</div>
+    </div>
+    <div class="video-controls">
+      <span style="color:var(--text-muted)">STATUS:</span>
+      <span id="video-status">STANDBY</span>
+    </div>
+  </main>
+
+  <aside class="control-panel">
+    <div class="tabs">
+      <button class="tab active" data-tab="stream">STREAM</button>
+      <button class="tab" data-tab="ptz">PTZ</button>
+      <button class="tab" data-tab="recording">REC</button>
+    </div>
+    <div id="no-node-selected" class="placeholder">// SELECT NODE</div>
+    <div id="control-content" style="display:none">
+      <!-- Stream Tab -->
+      <div id="tab-stream" class="tab-content active">
+        <div class="control-section">
+          <h3>Resolution</h3>
+          <div class="preset-buttons">
+            <button onclick="setResolution(1920, 1080)">1080P</button>
+            <button onclick="setResolution(1280, 720)">720P</button>
+            <button onclick="setResolution(854, 480)">480P</button>
+            <button onclick="setResolution(640, 360)">360P</button>
+          </div>
+          <div class="custom-input">
+            <input type="number" id="res-w" placeholder="W" value="1280">
+            <span>x</span>
+            <input type="number" id="res-h" placeholder="H" value="720">
+            <button class="primary" onclick="setCustomResolution()">SET</button>
+          </div>
+        </div>
+        <div class="control-section">
+          <h3>Bitrate (KBPS)</h3>
+          <div class="custom-input">
+            <input type="number" id="bitrate" placeholder="KBPS" value="2000" min="100" max="20000" style="width:80px">
+            <button class="primary" onclick="setBitrate()">SET</button>
+          </div>
+        </div>
+        <div class="control-section">
+          <h3>Frame Rate</h3>
+          <div class="preset-buttons">
+            <button onclick="setFps(30)">30</button>
+            <button onclick="setFps(25)">25</button>
+            <button onclick="setFps(15)">15</button>
+            <button onclick="setFps(10)">10</button>
+          </div>
+        </div>
+        <div style="padding: 0 12px;">
+          <button onclick="getParams()" style="width:100%;margin-top:8px">REFRESH</button>
+          <button onclick="restartPipeline()" style="width:100%;margin-top:6px;border-color:var(--status-warning);color:var(--status-warning)">RESTART PIPELINE</button>
+        </div>
+      </div>
+
+      <!-- PTZ Tab -->
+      <div id="tab-ptz" class="tab-content">
+        <div class="ptz-container">
+          <div class="ptz-settings">
+            <div class="ptz-setting">
+              <label>SPD</label>
+              <input type="range" id="ptz-speed" min="0.1" max="1" step="0.1" value="0.5" style="width:70px">
+            </div>
+            <div class="ptz-setting">
+              <label>DUR</label>
+              <select id="ptz-duration">
+                <option value="0">HOLD</option>
+                <option value="250">250MS</option>
+                <option value="500" selected>500MS</option>
+                <option value="1000">1S</option>
+              </select>
+            </div>
+          </div>
+          <div class="dpad">
+            <div></div>
+            <button onmousedown="ptzMove('up')" onmouseup="ptzStop()" onmouseleave="ptzStop()">&#9650;</button>
+            <div></div>
+            <button onmousedown="ptzMove('left')" onmouseup="ptzStop()" onmouseleave="ptzStop()">&#9664;</button>
+            <button class="dpad-center" onclick="ptzHome()">&#8962;</button>
+            <button onmousedown="ptzMove('right')" onmouseup="ptzStop()" onmouseleave="ptzStop()">&#9654;</button>
+            <div></div>
+            <button onmousedown="ptzMove('down')" onmouseup="ptzStop()" onmouseleave="ptzStop()">&#9660;</button>
+            <div></div>
+          </div>
+          <div class="zoom-buttons">
+            <button onmousedown="ptzMove('zoomout')" onmouseup="ptzStop()" onmouseleave="ptzStop()">-</button>
+            <button onmousedown="ptzMove('zoomin')" onmouseup="ptzStop()" onmouseleave="ptzStop()">+</button>
+          </div>
+          <div class="ptz-actions">
+            <button onclick="ptzStop()">STOP</button>
+            <button onclick="ptzStatus()">STATUS</button>
+            <button onclick="ptzInfo()">INFO</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recording Tab -->
+      <div id="tab-recording" class="tab-content">
+        <div class="control-section">
+          <h3>Quick Access</h3>
+          <div class="quick-buttons">
+            <button onclick="downloadRecordingsQuick('5 mins ago')">5M</button>
+            <button onclick="downloadRecordingsQuick('15 mins ago')">15M</button>
+            <button onclick="downloadRecordingsQuick('last hour')">1H</button>
+            <button onclick="downloadRecordingsQuick('2 hours ago')">2H</button>
+            <button onclick="downloadRecordingsQuick('since midnight')">TODAY</button>
+          </div>
+        </div>
+        <div class="control-section">
+          <h3>Custom Range</h3>
+          <div class="date-inputs">
+            <div class="date-row">
+              <label>FROM:</label>
+              <input type="datetime-local" id="rec-from">
+            </div>
+            <div class="date-row">
+              <label>TO:</label>
+              <input type="datetime-local" id="rec-to">
+            </div>
+          </div>
+          <div class="recording-actions">
+            <button class="primary" onclick="getCustomRecordings()">DOWNLOAD</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <aside class="log-panel">
+    <div class="log-header">
+      <span>System Log</span>
+      <div class="log-controls">
+        <select id="log-filter">
+          <option value="all">ALL</option>
+          <option value="approval">AUTH</option>
+          <option value="command">CMD</option>
+          <option value="response">RSP</option>
+        </select>
+        <button onclick="clearLog()">CLR</button>
+      </div>
+    </div>
+    <div id="log"></div>
+  </aside>
+
+  <div class="command-bar">
+    <span>&gt;_</span>
+    <input id="cmd" placeholder="Enter command..." autofocus>
+  </div>
+</div>
+
+<script>
+// State
+let ws = null;
+let selectedNode = null;
+let connectedNodes = new Map();
+let pendingNodes = new Map();
+let commandHistory = [];
+let historyIndex = -1;
+let ptzContinuous = false;
+let nodeSearchQuery = '';
+
+function fuzzyMatch(pattern, str) {
+  pattern = pattern.toLowerCase();
+  str = str.toLowerCase();
+  if (pattern.length === 0) return { score: 1, matches: [] };
+  if (pattern.length > str.length) return { score: -1, matches: [] };
+  const exactIdx = str.indexOf(pattern);
+  if (exactIdx !== -1) {
+    const matches = [];
+    for (let i = 0; i < pattern.length; i++) matches.push(exactIdx + i);
+    return { score: 100 + (str.length - pattern.length), matches };
+  }
+  let patternIdx = 0, score = 0, lastMatchIdx = -1;
+  const matches = [];
+  for (let i = 0; i < str.length && patternIdx < pattern.length; i++) {
+    if (str[i] === pattern[patternIdx]) {
+      matches.push(i);
+      if (lastMatchIdx === i - 1) score += 10;
+      if (i === 0 || str[i-1] === '-' || str[i-1] === '_' || str[i-1] === ' ') score += 5;
+      score += 1;
+      lastMatchIdx = i;
+      patternIdx++;
+    }
+  }
+  if (patternIdx !== pattern.length) return { score: -1, matches: [] };
+  return { score, matches };
+}
+
+function filterNodes() {
+  nodeSearchQuery = document.getElementById('node-search').value;
+  updateNodeList();
+  updatePendingList();
+}
+
+function highlightMatches(name, matches) {
+  if (matches.length === 0) return document.createTextNode(name);
+  const span = document.createElement('span');
+  span.className = 'node-name';
+  let lastIdx = 0;
+  for (const matchIdx of matches) {
+    if (matchIdx > lastIdx) span.appendChild(document.createTextNode(name.slice(lastIdx, matchIdx)));
+    const highlight = document.createElement('span');
+    highlight.className = 'match';
+    highlight.textContent = name[matchIdx];
+    span.appendChild(highlight);
+    lastIdx = matchIdx + 1;
+  }
+  if (lastIdx < name.length) span.appendChild(document.createTextNode(name.slice(lastIdx)));
+  return span;
+}
+
+let sessionToken = localStorage.getItem('admin_session');
+let pendingCredentials = null;
+let userRole = null;
+let hls = null;
+const video = document.getElementById('video-player');
+const videoPlaceholder = document.getElementById('video-placeholder');
+const videoStatus = document.getElementById('video-status');
+const log = document.getElementById('log');
+const cmd = document.getElementById('cmd');
+const statusDot = document.getElementById('status-dot');
+const statusText = document.getElementById('status-text');
+const loginOverlay = document.getElementById('login-overlay');
+const loginError = document.getElementById('login-error');
+const logoutBtn = document.getElementById('logout-btn');
+const adminLink = document.getElementById('admin-link');
+
+initHls();
+setupTabs();
+if (sessionToken) connectWebSocket();
+
+function initHls() {
+  if (Hls.isSupported()) {
+    hls = new Hls({ liveSyncDuration: 3, liveMaxLatencyDuration: 10, enableWorker: true, lowLatencyMode: true });
+    hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(() => {}); videoStatus.textContent = 'STREAMING'; });
+    hls.on(Hls.Events.ERROR, (event, data) => {
+      if (data.fatal) {
+        videoStatus.textContent = 'ERROR';
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) setTimeout(() => { if (hls) hls.startLoad(); }, 3000);
+      }
+    });
+    hls.on(Hls.Events.FRAG_BUFFERED, () => { videoStatus.textContent = 'STREAMING'; });
+  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.addEventListener('loadedmetadata', () => video.play());
+  }
+}
+
+function playLive(nodeName) {
+  if (!nodeName) return;
+  videoPlaceholder.style.display = 'none';
+  video.style.display = 'block';
+  videoStatus.textContent = 'CONNECTING...';
+  const url = `/hls/${nodeName}/stream.m3u8`;
+  if (hls) hls.loadSource(url); else video.src = url;
+}
+
+function stopVideo() {
+  if (hls) hls.stopLoad();
+  video.style.display = 'none';
+  videoPlaceholder.style.display = 'flex';
+  videoStatus.textContent = 'STANDBY';
+}
+
+function downloadRecordingsQuick(timeSpec) {
+  if (!selectedNode) return;
+  const now = new Date();
+  let from;
+  if (timeSpec === '5 mins ago') from = new Date(now - 5 * 60 * 1000);
+  else if (timeSpec === '15 mins ago') from = new Date(now - 15 * 60 * 1000);
+  else if (timeSpec === 'last hour') from = new Date(now - 60 * 60 * 1000);
+  else if (timeSpec === '2 hours ago') from = new Date(now - 2 * 60 * 60 * 1000);
+  else if (timeSpec === 'since midnight') { from = new Date(now); from.setHours(0, 0, 0, 0); }
+  else from = new Date(now - 5 * 60 * 1000);
+  sendCommand(`${selectedNode} recordings ${from.toISOString()} ${now.toISOString()}`);
+}
+
+function login() {
+  const username = document.getElementById('login-username').value;
+  const code = document.getElementById('login-totp').value;
+  if (!username || !code) { loginError.textContent = 'ENTER CREDENTIALS'; return; }
+  if (code.length !== 6 || !/^\d+$/.test(code)) { loginError.textContent = 'INVALID CODE FORMAT'; return; }
+  loginError.textContent = '';
+  pendingCredentials = { username, code };
+  connectWebSocket();
+}
+
+function logout() {
+  localStorage.removeItem('admin_session');
+  sessionToken = null;
+  userRole = null;
+  if (ws) ws.close();
+  location.reload();
+}
+
+function connectWebSocket() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => {
+    if (sessionToken) ws.send(`TOKEN|${sessionToken}`);
+    else if (pendingCredentials) { ws.send(`TOTP|${pendingCredentials.username}|${pendingCredentials.code}`); pendingCredentials = null; }
+  };
+  ws.onclose = () => {
+    statusDot.classList.remove('connected');
+    statusText.textContent = 'OFFLINE';
+    if (sessionToken) { append('// RECONNECTING...', 'system'); setTimeout(connectWebSocket, 3000); }
+  };
+  ws.onerror = () => append('// CONNECTION ERROR', 'error');
+  ws.onmessage = handleMessage;
+}
+
+function handleMessage(e) {
+  const msg = e.data;
+  if (msg.startsWith('AUTH_OK|')) {
+    const parts = msg.split('|');
+    const token = parts[1], role = parts[2] || 'user';
+    if (token) { sessionToken = token; localStorage.setItem('admin_session', token); }
+    userRole = role;
+    loginOverlay.style.display = 'none';
+    logoutBtn.style.display = 'block';
+    if (role === 'admin') adminLink.style.display = 'block';
+    statusDot.classList.add('connected');
+    statusText.textContent = 'ONLINE';
+    append('// AUTHENTICATED: ' + role.toUpperCase(), 'system');
+    ws.send('nodes');
+    return;
+  } else if (msg === 'AUTH_FAILED') {
+    localStorage.removeItem('admin_session');
+    sessionToken = null; userRole = null;
+    loginOverlay.style.display = 'flex';
+    logoutBtn.style.display = 'none';
+    adminLink.style.display = 'none';
+    loginError.textContent = 'ACCESS DENIED';
+    if (ws) ws.close();
+    return;
+  }
+  if (msg.startsWith('PENDING|')) {
+    const [_, name, fp, addr] = msg.split('|');
+    pendingNodes.set(name, { fingerprint: fp, address: addr });
+    updatePendingList();
+    append(`[PENDING] ${name} (${fp}) @ ${addr}`, 'pending');
+  } else if (msg.startsWith('APPROVED|')) {
+    const name = msg.split('|')[1];
+    pendingNodes.delete(name);
+    updatePendingList();
+    append(`[APPROVED] ${name}`, 'approved');
+  } else if (msg.startsWith('REJECTED|')) {
+    const name = msg.split('|')[1];
+    pendingNodes.delete(name);
+    updatePendingList();
+    append(`[REJECTED] ${name}`, 'rejected');
+  } else if (msg.startsWith('CONNECTED|')) {
+    const name = msg.split('|')[1];
+    connectedNodes.set(name, { status: 'connected' });
+    updateNodeList();
+    append(`[ONLINE] ${name}`, 'approved');
+  } else if (msg.startsWith('DISCONNECTED|')) {
+    const name = msg.split('|')[1];
+    connectedNodes.delete(name);
+    if (selectedNode === name) { selectedNode = null; updateControlPanel(); stopVideo(); }
+    updateNodeList();
+    append(`[OFFLINE] ${name}`, 'rejected');
+  } else if (msg.startsWith('Connected nodes:')) {
+    parseNodesList(msg);
+  } else if (msg.startsWith('[')) {
+    append(msg, 'response');
+  } else {
+    append(msg);
+  }
+}
+
+function parseNodesList(msg) {
+  const lines = msg.split('\n');
+  connectedNodes.clear();
+  for (const line of lines) {
+    const match = line.match(/^\s+(\S+)\s+-\s+/);
+    if (match) connectedNodes.set(match[1], { status: 'connected' });
+  }
+  updateNodeList();
+}
+
+function sendCommand(cmdStr) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    append('> ' + cmdStr, 'command');
+    ws.send(cmdStr);
+    commandHistory.push(cmdStr);
+    historyIndex = commandHistory.length;
+  }
+}
+
+function selectNode(name) {
+  selectedNode = name;
+  updateNodeList();
+  updateControlPanel();
+  sendCommand(`${name} params`);
+  playLive(name);
+}
+
+function approveNode(name) { sendCommand(`approve ${name}`); }
+function rejectNode(name) { sendCommand(`reject ${name}`); }
+
+function updateNodeList() {
+  const container = document.getElementById('connected-nodes');
+  if (connectedNodes.size === 0) { container.innerHTML = '<div class="no-items">No nodes online</div>'; return; }
+  const filteredNodes = [];
+  connectedNodes.forEach((info, name) => {
+    const result = fuzzyMatch(nodeSearchQuery, name);
+    if (result.score >= 0) filteredNodes.push({ name, info, score: result.score, matches: result.matches });
+  });
+  filteredNodes.sort((a, b) => b.score - a.score);
+  container.innerHTML = '';
+  if (filteredNodes.length === 0) { container.innerHTML = '<div class="no-items">No matches</div>'; return; }
+  filteredNodes.forEach(({ name, matches }) => {
+    const card = document.createElement('div');
+    card.className = 'node-card' + (selectedNode === name ? ' selected' : '');
+    const dot = document.createElement('div');
+    dot.className = 'node-dot';
+    card.appendChild(dot);
+    card.appendChild(highlightMatches(name, matches));
+    card.onclick = () => selectNode(name);
+    container.appendChild(card);
+  });
+}
+
+function updatePendingList() {
+  const container = document.getElementById('pending-nodes');
+  if (pendingNodes.size === 0) { container.innerHTML = '<div class="no-items">No pending nodes</div>'; return; }
+  const filteredNodes = [];
+  pendingNodes.forEach((info, name) => {
+    const result = fuzzyMatch(nodeSearchQuery, name);
+    if (result.score >= 0) filteredNodes.push({ name, info, score: result.score, matches: result.matches });
+  });
+  filteredNodes.sort((a, b) => b.score - a.score);
+  container.innerHTML = '';
+  if (filteredNodes.length === 0) { container.innerHTML = '<div class="no-items">No matches</div>'; return; }
+  filteredNodes.forEach(({ name, matches }) => {
+    const card = document.createElement('div');
+    card.className = 'node-card pending';
+    const dot = document.createElement('div');
+    dot.className = 'node-dot';
+    const actions = document.createElement('div');
+    actions.className = 'node-actions';
+    const approveBtn = document.createElement('button');
+    approveBtn.className = 'approve';
+    approveBtn.textContent = 'OK';
+    approveBtn.onclick = (e) => { e.stopPropagation(); approveNode(name); };
+    const rejectBtn = document.createElement('button');
+    rejectBtn.className = 'reject';
+    rejectBtn.textContent = 'X';
+    rejectBtn.onclick = (e) => { e.stopPropagation(); rejectNode(name); };
+    actions.appendChild(approveBtn);
+    actions.appendChild(rejectBtn);
+    card.appendChild(dot);
+    card.appendChild(highlightMatches(name, matches));
+    card.appendChild(actions);
+    container.appendChild(card);
+  });
+}
+
+function updateControlPanel() {
+  const content = document.getElementById('control-content');
+  const placeholder = document.getElementById('no-node-selected');
+  if (selectedNode) { content.style.display = 'block'; placeholder.style.display = 'none'; }
+  else { content.style.display = 'none'; placeholder.style.display = 'flex'; }
+}
+
+function setupTabs() {
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.onclick = () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+    };
+  });
+}
+
+function setResolution(w, h) { if (selectedNode) sendCommand(`${selectedNode} res ${w} ${h}`); }
+function setCustomResolution() {
+  const w = document.getElementById('res-w').value, h = document.getElementById('res-h').value;
+  if (selectedNode && w && h) sendCommand(`${selectedNode} res ${w} ${h}`);
+}
+function setBitrate() { const bitrate = document.getElementById('bitrate').value; if (selectedNode && bitrate) sendCommand(`${selectedNode} bitrate ${bitrate}`); }
+function setFps(rate) { if (selectedNode) sendCommand(`${selectedNode} fps ${rate}`); }
+function getParams() { if (selectedNode) sendCommand(`${selectedNode} params`); }
+function restartPipeline() { if (selectedNode) sendCommand(`${selectedNode} restart`); }
+
+function ptzMove(direction) {
+  if (!selectedNode) return;
+  const speed = document.getElementById('ptz-speed').value, duration = document.getElementById('ptz-duration').value;
+  if (duration === '0') { ptzContinuous = true; sendCommand(`${selectedNode} ${direction} ${speed}`); }
+  else sendCommand(`${selectedNode} ${direction} ${speed} ${duration}`);
+}
+function ptzStop() { if (ptzContinuous && selectedNode) { sendCommand(`${selectedNode} stop`); ptzContinuous = false; } }
+function ptzHome() { if (selectedNode) sendCommand(`${selectedNode} home`); }
+function ptzStatus() { if (selectedNode) sendCommand(`${selectedNode} status`); }
+function ptzInfo() { if (selectedNode) sendCommand(`${selectedNode} info`); }
+
+function getRecordings(timeSpec) { if (selectedNode) sendCommand(`${selectedNode} recordings ${timeSpec}`); }
+function getCustomRecordings() {
+  const from = document.getElementById('rec-from').value, to = document.getElementById('rec-to').value;
+  if (selectedNode && from && to) sendCommand(`${selectedNode} recordings ${new Date(from).toISOString()} ${new Date(to).toISOString()}`);
+}
+
+function append(text, cls) {
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  line.textContent = text;
+  if (cls) line.classList.add(cls);
+  line.dataset.type = getMessageType(text, cls);
+  log.appendChild(line);
+  applyFilter(line);
+  log.scrollTop = log.scrollHeight;
+}
+
+function getMessageType(text, cls) {
+  if (cls === 'pending' || cls === 'approved' || cls === 'rejected') return 'approval';
+  if (cls === 'command') return 'command';
+  if (cls === 'response') return 'response';
+  return 'info';
+}
+
+function applyFilter(line) {
+  const filter = document.getElementById('log-filter').value;
+  line.style.display = (filter === 'all' || line.dataset.type === filter) ? '' : 'none';
+}
+
+document.getElementById('log-filter').onchange = () => { document.querySelectorAll('.log-line').forEach(applyFilter); };
+function clearLog() { log.innerHTML = ''; }
+
+cmd.onkeydown = (e) => {
+  if (e.key === 'Enter' && cmd.value.trim()) { sendCommand(cmd.value.trim()); cmd.value = ''; }
+  else if (e.key === 'ArrowUp') { if (historyIndex > 0) { historyIndex--; cmd.value = commandHistory[historyIndex]; } e.preventDefault(); }
+  else if (e.key === 'ArrowDown') { if (historyIndex < commandHistory.length - 1) { historyIndex++; cmd.value = commandHistory[historyIndex]; } else { historyIndex = commandHistory.length; cmd.value = ''; } e.preventDefault(); }
+};
+</script>
+</body>
+</html>

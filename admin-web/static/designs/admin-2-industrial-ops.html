@@ -1,0 +1,738 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SlingShot - User Management</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg-primary: #0a0a0a;
+  --bg-secondary: #151515;
+  --bg-tertiary: #1a1a1a;
+  --text-primary: #e8e8e8;
+  --text-secondary: #a0a0a0;
+  --text-dim: #707070;
+  --accent-primary: #f59e0b;
+  --accent-hover: #fb923c;
+  --accent-dark: #d97706;
+  --status-success: #10b981;
+  --status-error: #ef4444;
+  --border-color: #2a2a2a;
+  --border-accent: #3a3a3a;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  line-height: 1.6;
+  position: relative;
+}
+/* Scanline effect */
+body::before {
+  content: '';
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.03) 2px,
+    rgba(0, 0, 0, 0.03) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+.header {
+  background: var(--bg-secondary);
+  padding: 14px 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 2px solid var(--accent-primary);
+  box-shadow: 0 4px 12px rgba(245, 158, 11, 0.1);
+  position: relative;
+}
+.header::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent-primary), transparent);
+}
+.header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--accent-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  text-shadow: 0 0 10px rgba(245, 158, 11, 0.3);
+}
+.header-right { display: flex; gap: 12px; align-items: center; }
+.status-dot {
+  width: 10px; height: 10px;
+  background: var(--status-error);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--bg-secondary), 0 0 8px var(--status-error);
+  animation: pulse 2s ease-in-out infinite;
+}
+.status-dot.connected {
+  background: var(--status-success);
+  box-shadow: 0 0 0 2px var(--bg-secondary), 0 0 12px var(--status-success);
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+.btn {
+  background: transparent;
+  border: 1px solid var(--accent-primary);
+  color: var(--accent-primary);
+  padding: 6px 14px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  text-decoration: none;
+  display: inline-block;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  transition: all 0.2s ease;
+  position: relative;
+}
+.btn::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: var(--accent-primary);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.btn:hover::before {
+  opacity: 0.15;
+}
+.btn:hover {
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.4);
+  transform: translateY(-1px);
+}
+.btn-red {
+  border-color: var(--status-error);
+  color: var(--status-error);
+}
+.btn-red::before {
+  background: var(--status-error);
+}
+.btn-red:hover {
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.4);
+}
+.container {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 32px 24px;
+}
+.card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  padding: 24px;
+  margin-bottom: 24px;
+  position: relative;
+}
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0;
+  width: 3px;
+  height: 100%;
+  background: var(--accent-primary);
+  opacity: 0.5;
+}
+.card h2 {
+  margin-bottom: 20px;
+  color: var(--accent-primary);
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+th, td {
+  text-align: left;
+  padding: 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+th {
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  background: var(--bg-tertiary);
+}
+tbody tr {
+  transition: background 0.15s ease;
+}
+tbody tr:hover {
+  background: var(--bg-tertiary);
+  box-shadow: inset 3px 0 0 var(--accent-primary);
+}
+.role-admin {
+  color: var(--accent-primary);
+  font-weight: 600;
+}
+.role-user {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.actions { display: flex; gap: 8px; }
+.actions button { padding: 5px 10px; font-size: 11px; }
+/* Login Overlay */
+.login-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.95);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+.login-box {
+  background: var(--bg-secondary);
+  padding: 3rem;
+  border: 2px solid var(--accent-primary);
+  text-align: center;
+  min-width: 340px;
+  position: relative;
+  box-shadow: 0 0 30px rgba(245, 158, 11, 0.2);
+}
+.login-box::before {
+  content: '';
+  position: absolute;
+  top: -2px; left: -2px; right: -2px; bottom: -2px;
+  background: linear-gradient(45deg, var(--accent-primary), var(--accent-dark));
+  z-index: -1;
+  opacity: 0.1;
+}
+.login-box h2 {
+  margin-bottom: 2rem;
+  color: var(--accent-primary);
+  font-weight: 600;
+  font-size: 18px;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  text-shadow: 0 0 10px rgba(245, 158, 11, 0.4);
+}
+.login-box input {
+  display: block;
+  width: 100%;
+  margin: 0.75rem auto;
+  padding: 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-accent);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  transition: border-color 0.2s ease;
+}
+.login-box input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.3);
+}
+.login-box button {
+  margin-top: 1.5rem;
+  width: 100%;
+  padding: 10px;
+}
+.login-error {
+  color: var(--status-error);
+  margin-top: 1rem;
+  font-size: 12px;
+  font-weight: 500;
+}
+/* Modal */
+.modal {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.95);
+  display: none; align-items: center; justify-content: center;
+  z-index: 1001;
+}
+.modal.active { display: flex; }
+.modal-content {
+  background: var(--bg-secondary);
+  padding: 2.5rem;
+  border: 2px solid var(--accent-primary);
+  max-width: 520px;
+  width: 100%;
+  box-shadow: 0 0 30px rgba(245, 158, 11, 0.2);
+  position: relative;
+}
+.modal-content::before {
+  content: '';
+  position: absolute;
+  top: -2px; left: -2px; right: -2px; bottom: -2px;
+  background: linear-gradient(45deg, var(--accent-primary), var(--accent-dark));
+  z-index: -1;
+  opacity: 0.1;
+}
+.modal-content h3 {
+  margin-bottom: 1.5rem;
+  color: var(--accent-primary);
+  font-weight: 600;
+  font-size: 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.form-group { margin-bottom: 1.25rem; }
+.form-group label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.form-group input, .form-group select, .form-group textarea {
+  width: 100%;
+  padding: 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-accent);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  transition: border-color 0.2s ease;
+}
+.form-group input:focus, .form-group select:focus, .form-group textarea:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.3);
+}
+.form-group textarea { height: 80px; resize: vertical; }
+.modal-actions { display: flex; gap: 12px; margin-top: 1.5rem; }
+.qr-container {
+  text-align: center;
+  margin: 1.5rem 0;
+  padding: 1.5rem;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-accent);
+}
+.qr-container img {
+  max-width: 200px;
+  background: white;
+  padding: 12px;
+  box-shadow: 0 0 20px rgba(245, 158, 11, 0.2);
+}
+.qr-secret {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 12px;
+  word-break: break-all;
+  font-family: inherit;
+  background: var(--bg-primary);
+  padding: 8px;
+  border: 1px solid var(--border-color);
+}
+.message {
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  font-size: 12px;
+  font-weight: 500;
+  border-left: 3px solid;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.message.error {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: var(--status-error);
+  color: var(--status-error);
+}
+.message.success {
+  background: rgba(16, 185, 129, 0.1);
+  border-color: var(--status-success);
+  color: var(--status-success);
+}
+</style>
+</head>
+<body>
+<!-- Login Overlay -->
+<div id="login-overlay" class="login-overlay">
+  <div class="login-box">
+    <h2>SlingShot Admin</h2>
+    <input type="text" id="login-username" placeholder="Username" value="admin">
+    <input type="text" id="login-totp" placeholder="6-digit code" maxlength="6" onkeydown="if(event.key==='Enter')login()" autocomplete="off">
+    <button class="btn" onclick="login()">Login</button>
+    <div id="login-error" class="login-error"></div>
+  </div>
+</div>
+
+<header class="header">
+  <h1>User Management</h1>
+  <div class="header-right">
+    <div class="status-dot" id="status-dot"></div>
+    <a href="/" class="btn">Dashboard</a>
+    <button class="btn btn-red" onclick="logout()">Logout</button>
+  </div>
+</header>
+
+<div class="container">
+  <div id="message-area"></div>
+
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px">
+      <h2>Users</h2>
+      <button class="btn" onclick="showAddUserModal()">Add User</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Username</th>
+          <th>Role</th>
+          <th>Description</th>
+          <th>Created</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="users-table">
+        <tr><td colspan="5" style="text-align:center; color:var(--text-dim)">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Add User Modal -->
+<div id="add-user-modal" class="modal">
+  <div class="modal-content">
+    <h3 id="modal-title">Add User</h3>
+    <div id="add-user-form">
+      <div class="form-group">
+        <label>Username</label>
+        <input type="text" id="new-username" placeholder="username">
+      </div>
+      <div class="form-group">
+        <label>Role</label>
+        <select id="new-role">
+          <option value="user">User</option>
+          <option value="admin">Admin</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Description (optional)</label>
+        <textarea id="new-description" placeholder="Brief description (max 255 chars)" maxlength="255"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="createUser()">Create</button>
+        <button class="btn btn-red" onclick="closeModal()">Cancel</button>
+      </div>
+    </div>
+    <div id="qr-display" style="display:none">
+      <p style="margin-bottom:1rem; color: var(--text-secondary)">Have the user scan this QR code with their authenticator app:</p>
+      <div class="qr-container">
+        <img id="qr-image" src="" alt="QR Code">
+        <div class="qr-secret">Secret: <span id="qr-secret-text"></span></div>
+      </div>
+      <div class="form-group">
+        <label>Enter 6-digit code to verify</label>
+        <input type="text" id="verify-code" placeholder="123456" maxlength="6">
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="verifyUser()">Verify & Save</button>
+        <button class="btn btn-red" onclick="closeModal()">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Edit User Modal -->
+<div id="edit-user-modal" class="modal">
+  <div class="modal-content">
+    <h3>Edit User: <span id="edit-username-display"></span></h3>
+    <div class="form-group">
+      <label>Role</label>
+      <select id="edit-role">
+        <option value="user">User</option>
+        <option value="admin">Admin</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Description</label>
+      <textarea id="edit-description" maxlength="255"></textarea>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="saveUserEdit()">Save</button>
+      <button class="btn btn-red" onclick="closeEditModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let ws = null;
+let sessionToken = localStorage.getItem('admin_session');
+let pendingCredentials = null;
+let pendingUser = null; // For QR verification flow
+
+const loginOverlay = document.getElementById('login-overlay');
+const loginError = document.getElementById('login-error');
+const statusDot = document.getElementById('status-dot');
+const usersTable = document.getElementById('users-table');
+const messageArea = document.getElementById('message-area');
+
+// Initialize
+if (sessionToken) {
+  connectWebSocket();
+}
+
+function login() {
+  const username = document.getElementById('login-username').value;
+  const code = document.getElementById('login-totp').value;
+  if (!username || !code) {
+    loginError.textContent = 'Please enter username and 6-digit code';
+    return;
+  }
+  if (code.length !== 6 || !/^\d+$/.test(code)) {
+    loginError.textContent = 'Code must be 6 digits';
+    return;
+  }
+  loginError.textContent = '';
+  pendingCredentials = { username, code };
+  connectWebSocket();
+}
+
+function logout() {
+  localStorage.removeItem('admin_session');
+  sessionToken = null;
+  if (ws) ws.close();
+  location.reload();
+}
+
+function connectWebSocket() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => {
+    if (sessionToken) {
+      ws.send(`TOKEN|${sessionToken}`);
+    } else if (pendingCredentials) {
+      ws.send(`TOTP|${pendingCredentials.username}|${pendingCredentials.code}`);
+      pendingCredentials = null;
+    }
+  };
+  ws.onclose = () => {
+    statusDot.classList.remove('connected');
+    if (sessionToken) {
+      setTimeout(connectWebSocket, 3000);
+    }
+  };
+  ws.onmessage = handleMessage;
+}
+
+function handleMessage(e) {
+  const msg = e.data;
+
+  if (msg.startsWith('AUTH_OK|')) {
+    const parts = msg.split('|');
+    const token = parts[1];
+    const role = parts[2] || 'user';
+    if (token) {
+      sessionToken = token;
+      localStorage.setItem('admin_session', token);
+    }
+    if (role !== 'admin') {
+      // Non-admin users get redirected to main dashboard
+      window.location.href = '/';
+      return;
+    }
+    loginOverlay.style.display = 'none';
+    statusDot.classList.add('connected');
+    ws.send('users');
+    return;
+  }
+
+  if (msg === 'AUTH_FAILED') {
+    localStorage.removeItem('admin_session');
+    sessionToken = null;
+    loginOverlay.style.display = 'flex';
+    loginError.textContent = 'Invalid credentials';
+    if (ws) ws.close();
+    return;
+  }
+
+  if (msg.startsWith('USERS|')) {
+    const json = msg.substring(6);
+    try {
+      const users = JSON.parse(json);
+      renderUsers(users);
+    } catch (e) {
+      console.error('Failed to parse users:', e);
+    }
+    return;
+  }
+
+  if (msg.startsWith('USER_QR|')) {
+    // USER_QR|username|role|description|secret|base64png
+    const parts = msg.split('|');
+    if (parts.length >= 6) {
+      pendingUser = {
+        username: parts[1],
+        role: parts[2],
+        description: parts[3],
+        secret: parts[4]
+      };
+      const qrBase64 = parts[5];
+      document.getElementById('qr-image').src = 'data:image/png;base64,' + qrBase64;
+      document.getElementById('qr-secret-text').textContent = parts[4];
+      document.getElementById('add-user-form').style.display = 'none';
+      document.getElementById('qr-display').style.display = 'block';
+      document.getElementById('modal-title').textContent = 'Setup TOTP for ' + parts[1];
+    }
+    return;
+  }
+
+  if (msg.startsWith('USER_CREATED|')) {
+    const username = msg.split('|')[1];
+    showSuccess(`User "${username}" created successfully`);
+    closeModal();
+    ws.send('users');
+    return;
+  }
+
+  if (msg.startsWith('USER_UPDATED|')) {
+    const username = msg.split('|')[1];
+    showSuccess(`User "${username}" updated`);
+    closeEditModal();
+    ws.send('users');
+    return;
+  }
+
+  if (msg.startsWith('USER_DELETED|')) {
+    const username = msg.split('|')[1];
+    showSuccess(`User "${username}" deleted`);
+    ws.send('users');
+    return;
+  }
+
+  if (msg.startsWith('ERROR|')) {
+    showError(msg.substring(6));
+    return;
+  }
+}
+
+function renderUsers(users) {
+  if (users.length === 0) {
+    usersTable.innerHTML = '<tr><td colspan="5" style="text-align:center; color:var(--text-dim)">No users</td></tr>';
+    return;
+  }
+  usersTable.innerHTML = users.map(u => `
+    <tr>
+      <td>${escapeHtml(u.username)}</td>
+      <td class="role-${u.role}">${u.role}</td>
+      <td style="color:var(--text-dim)">${escapeHtml(u.description || '-')}</td>
+      <td style="color:var(--text-dim)">${formatDate(u.created_at)}</td>
+      <td class="actions">
+        <button class="btn" onclick="editUser('${escapeHtml(u.username)}', '${u.role}', '${escapeHtml(u.description || '')}')">Edit</button>
+        <button class="btn btn-red" onclick="deleteUser('${escapeHtml(u.username)}')">Delete</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function showAddUserModal() {
+  document.getElementById('new-username').value = '';
+  document.getElementById('new-role').value = 'user';
+  document.getElementById('new-description').value = '';
+  document.getElementById('add-user-form').style.display = 'block';
+  document.getElementById('qr-display').style.display = 'none';
+  document.getElementById('modal-title').textContent = 'Add User';
+  document.getElementById('add-user-modal').classList.add('active');
+}
+
+function closeModal() {
+  document.getElementById('add-user-modal').classList.remove('active');
+  pendingUser = null;
+}
+
+function createUser() {
+  const username = document.getElementById('new-username').value.trim();
+  const role = document.getElementById('new-role').value;
+  const description = document.getElementById('new-description').value.trim();
+
+  if (!username) {
+    showError('Username is required');
+    return;
+  }
+
+  ws.send(`user_create|${username}|${role}|${description}`);
+}
+
+function verifyUser() {
+  const code = document.getElementById('verify-code').value.trim();
+  if (!code || code.length !== 6) {
+    showError('Enter a valid 6-digit code');
+    return;
+  }
+  if (!pendingUser) {
+    showError('No pending user');
+    return;
+  }
+
+  ws.send(`user_verify|${pendingUser.username}|${pendingUser.secret}|${pendingUser.role}|${pendingUser.description}|${code}`);
+}
+
+let editingUsername = '';
+
+function editUser(username, role, description) {
+  editingUsername = username;
+  document.getElementById('edit-username-display').textContent = username;
+  document.getElementById('edit-role').value = role;
+  document.getElementById('edit-description').value = description;
+  document.getElementById('edit-user-modal').classList.add('active');
+}
+
+function closeEditModal() {
+  document.getElementById('edit-user-modal').classList.remove('active');
+  editingUsername = '';
+}
+
+function saveUserEdit() {
+  const role = document.getElementById('edit-role').value;
+  const description = document.getElementById('edit-description').value.trim();
+
+  ws.send(`user_role|${editingUsername}|${role}`);
+  if (description !== '') {
+    ws.send(`user_desc|${editingUsername}|${description}`);
+  }
+}
+
+function deleteUser(username) {
+  if (confirm(`Delete user "${username}"? This cannot be undone.`)) {
+    ws.send(`user_delete|${username}`);
+  }
+}
+
+function showError(msg) {
+  messageArea.innerHTML = `<div class="message error">${escapeHtml(msg)}</div>`;
+  setTimeout(() => messageArea.innerHTML = '', 5000);
+}
+
+function showSuccess(msg) {
+  messageArea.innerHTML = `<div class="message success">${escapeHtml(msg)}</div>`;
+  setTimeout(() => messageArea.innerHTML = '', 3000);
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function formatDate(iso) {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString();
+  } catch (e) {
+    return iso;
+  }
+}
+</script>
+</body>
+</html>

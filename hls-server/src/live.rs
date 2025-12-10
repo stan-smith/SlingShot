@@ -74,7 +74,15 @@ impl LiveHlsStream {
                 "-hide_banner",
                 "-loglevel",
                 "warning",
-                // Input settings
+                // Low-latency input settings
+                "-fflags",
+                "nobuffer",
+                "-flags",
+                "low_delay",
+                "-probesize",
+                "32",
+                "-analyzeduration",
+                "0",
                 "-rtsp_transport",
                 "tcp",
                 "-i",
@@ -86,11 +94,11 @@ impl LiveHlsStream {
                 "-f",
                 "hls",
                 "-hls_time",
-                "2", // 2-second segments for low latency
+                "1", // 1-second segments for low latency
                 "-hls_list_size",
-                "5", // Keep 5 segments in playlist
+                "3", // Keep 3 segments in playlist
                 "-hls_flags",
-                "delete_segments+append_list",
+                "delete_segments+append_list+independent_segments",
                 "-hls_segment_filename",
                 segment_pattern.to_str().unwrap(),
                 // Use hls_base_url to prefix segment URLs in playlist
@@ -149,7 +157,7 @@ impl LiveHlsStream {
                     let age = std::time::SystemTime::now()
                         .duration_since(modified)
                         .unwrap_or_default();
-                    if age.as_secs() > 10 {
+                    if age.as_secs() > 5 {
                         // Playlist is stale - ffmpeg is stuck
                         tracing::warn!(
                             "HLS stream {} is stale ({}s old), marking unhealthy",

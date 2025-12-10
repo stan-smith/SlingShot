@@ -84,7 +84,10 @@ async fn live_playlist_handler(
         .map_err(|e| HlsError::Io(e))?;
 
     Ok((
-        [(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")],
+        [
+            (header::CONTENT_TYPE, "application/vnd.apple.mpegurl"),
+            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+        ],
         playlist,
     ))
 }
