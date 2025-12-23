@@ -492,6 +492,24 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
   border-color: var(--accent-red);
   color: var(--accent-red);
 }
+/* Theme selector */
+.theme-select {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  padding: 4px 8px;
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.theme-select:hover {
+  border-color: var(--text-primary);
+}
+.theme-select:focus {
+  outline: none;
+  border-color: var(--text-primary);
+}
 </style>
 </head>
 <body>
@@ -512,6 +530,13 @@ button.reject { border-color: var(--accent-red); color: var(--accent-red); }
     <div class="status">
       <div class="status-dot" id="status-dot"></div>
       <span id="status-text">Disconnected</span>
+      <select id="theme-select" class="theme-select" onchange="setTheme(this.value)">
+        <option value="default">Default</option>
+        <option value="corporate-clean">Corporate Clean</option>
+        <option value="industrial-ops">Industrial Ops</option>
+        <option value="material">Material Design</option>
+        <option value="glass">Glassmorphism</option>
+      </select>
       <a href="/admin" id="admin-link" class="logout-btn" style="display:none">Users</a>
       <button id="logout-btn" class="logout-btn" onclick="logout()" style="display:none">Logout</button>
     </div>
@@ -1320,6 +1345,44 @@ cmd.onkeydown = (e) => {
     e.preventDefault();
   }
 };
+
+// Theme management
+let currentThemeLink = null;
+
+function setTheme(themeName) {
+  // Remove existing theme stylesheet if any
+  if (currentThemeLink) {
+    currentThemeLink.remove();
+    currentThemeLink = null;
+  }
+
+  // Save preference to localStorage
+  localStorage.setItem('slingshot_theme', themeName);
+
+  // Update dropdown
+  document.getElementById('theme-select').value = themeName;
+
+  // If default theme, just use embedded styles
+  if (themeName === 'default') {
+    return;
+  }
+
+  // Load external theme CSS
+  const link = document.createElement('link');
+  link.rel = 'stylesheet';
+  link.href = `/themes/${themeName}/dashboard.css`;
+  link.id = 'theme-stylesheet';
+  document.head.appendChild(link);
+  currentThemeLink = link;
+}
+
+// Load saved theme on page load
+function initTheme() {
+  const savedTheme = localStorage.getItem('slingshot_theme') || 'default';
+  setTheme(savedTheme);
+}
+
+initTheme();
 </script>
 </body>
 </html>
