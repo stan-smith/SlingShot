@@ -406,7 +406,7 @@ impl FingerprintStore {
 
         // Create TOTP for QR code generation
         let totp = TOTP::new(
-            Algorithm::SHA256,
+            Algorithm::SHA1,
             6,
             1,
             30,
@@ -433,7 +433,7 @@ impl FingerprintStore {
 
         // Create TOTP and verify
         let totp = TOTP::new(
-            Algorithm::SHA256,
+            Algorithm::SHA1,
             6,
             1,
             30,
@@ -466,7 +466,7 @@ impl FingerprintStore {
 
         // Create TOTP and verify
         let totp = TOTP::new(
-            Algorithm::SHA256,
+            Algorithm::SHA1,
             6,
             1,
             30,
