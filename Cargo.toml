@@ -15,7 +15,7 @@ members = [
     "remote-setup",
     "central-setup",
     "fingerprint-store",
-    "kaiju-encryption",
+    "slingshot-encryption",
     "adaptive-bitrate",
     "ws-security",
     "audit-log",

@@ -1,4 +1,4 @@
-//! SQLite-backed fingerprint storage for kaiju central node
+//! SQLite-backed fingerprint storage for slingshot central node
 //!
 //! Stores approved node fingerprints for auto-approval on reconnection.
 

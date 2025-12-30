@@ -4,9 +4,9 @@ use dialoguer::{theme::ColorfulTheme, Confirm, Input};
 use std::fs;
 use std::process::Command;
 
-const SERVICE_NAME: &str = "kaiju-central";
-const SERVICE_FILE: &str = "/etc/systemd/system/kaiju-central.service";
-const INSTALL_PATH: &str = "/usr/local/bin/kaiju-central";
+const SERVICE_NAME: &str = "slingshot-central";
+const SERVICE_FILE: &str = "/etc/systemd/system/slingshot-central.service";
+const INSTALL_PATH: &str = "/usr/local/bin/slingshot-central";
 
 /// Get current service status as a human-readable string
 pub fn get_service_status() -> String {
@@ -77,7 +77,7 @@ pub fn install_service() -> Result<()> {
     println!("Service configuration:");
     println!("  User: {}", service_user);
     println!("  Binary: {}", INSTALL_PATH);
-    println!("  Config: ~/.config/kaiju/central.toml");
+    println!("  Config: ~/.config/slingshot/central.toml");
     println!();
 
     let proceed = Confirm::with_theme(&ColorfulTheme::default())
@@ -115,7 +115,7 @@ pub fn install_service() -> Result<()> {
     println!("Installing service file...");
 
     // Write to temp file first, then sudo mv
-    let temp_file = "/tmp/kaiju-central.service";
+    let temp_file = "/tmp/slingshot-central.service";
     fs::write(temp_file, &service_content)?;
 
     let status = Command::new("sudo")
@@ -204,7 +204,7 @@ pub fn uninstall_service() -> Result<()> {
     }
 
     let proceed = Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("Uninstall kaiju-central service?")
+        .with_prompt("Uninstall slingshot-central service?")
         .default(false)
         .interact()?;
 
@@ -264,7 +264,7 @@ pub fn uninstall_service() -> Result<()> {
 
     println!();
     println!("Service uninstalled.");
-    println!("Note: Configuration files in ~/.config/kaiju/ were not removed.");
+    println!("Note: Configuration files in ~/.config/slingshot/ were not removed.");
 
     Ok(())
 }
@@ -290,7 +290,7 @@ fn find_central_binary() -> Result<String> {
         "../target/release/central".to_string(),
         // Home directory builds
         format!(
-            "{}/kaiju/target/release/central",
+            "{}/slingshot/target/release/central",
             std::env::var("HOME").unwrap_or_default()
         ),
     ];
@@ -314,7 +314,7 @@ fn generate_service_file(config: &CentralConfig, user: &str, home: &str) -> Stri
 
     format!(
         r#"[Unit]
-Description=Kaiju Central Node - {bind_desc}
+Description=Slingshot Central Node - {bind_desc}
 After=network-online.target
 Wants=network-online.target
 

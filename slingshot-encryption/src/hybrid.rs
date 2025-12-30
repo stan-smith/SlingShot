@@ -31,7 +31,7 @@ pub const TAG_LEN: usize = 16;
 pub const MIN_CIPHERTEXT_LEN: usize = EPHEMERAL_KEY_LEN + NONCE_LEN + TAG_LEN;
 
 /// HKDF info string for key derivation
-const HKDF_INFO: &[u8] = b"kaiju-recording-encryption";
+const HKDF_INFO: &[u8] = b"slingshot-recording-encryption";
 
 /// Derive an AES-256 key from a shared secret using HKDF-SHA256.
 /// Uses nonce as salt for defense-in-depth (per HKDF best practices).

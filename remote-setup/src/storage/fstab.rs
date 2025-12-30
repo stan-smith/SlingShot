@@ -54,7 +54,7 @@ pub fn add_fstab_entry(entry: &FstabEntry) -> Result<(), Error> {
 
     // Build the lines to append
     let append_text = format!(
-        "\n# Storage for recordings (added by kaiju-remote-setup)\n{}\n",
+        "\n# Storage for recordings (added by slingshot-remote-setup)\n{}\n",
         entry.to_line()
     );
 

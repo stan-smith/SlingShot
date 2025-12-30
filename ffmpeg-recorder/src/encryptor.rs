@@ -1,9 +1,9 @@
 //! Segment encryption for recordings
 //!
 //! Monitors the output directory for completed segments and encrypts them.
-//! Uses hybrid encryption (X25519 + AES-256-GCM) via kaiju-encryption.
+//! Uses hybrid encryption (X25519 + AES-256-GCM) via slingshot-encryption.
 
-use kaiju_encryption::{seal_with_hex_key, EncryptionError};
+use slingshot_encryption::{seal_with_hex_key, EncryptionError};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -243,7 +243,7 @@ pub enum EncryptorError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kaiju_encryption::{open_with_hex_key, X25519KeyPair};
+    use slingshot_encryption::{open_with_hex_key, X25519KeyPair};
     use std::fs;
     use tempfile::tempdir;
 

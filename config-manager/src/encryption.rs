@@ -92,7 +92,7 @@ impl EncryptionConfig {
     }
 }
 
-/// Get encryption config path: ~/.config/kaiju/encryption.toml
+/// Get encryption config path: ~/.config/slingshot/encryption.toml
 fn encryption_path() -> Result<PathBuf, ConfigError> {
     Ok(paths::config_dir()?.join("encryption.toml"))
 }

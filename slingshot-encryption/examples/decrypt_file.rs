@@ -1,4 +1,4 @@
-use kaiju_encryption::open_with_hex_key;
+use slingshot_encryption::open_with_hex_key;
 use std::fs;
 use std::env;
 

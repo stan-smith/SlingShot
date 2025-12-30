@@ -80,7 +80,7 @@ impl IdentityConfig {
     }
 }
 
-/// Get identity file path: ~/.config/kaiju/identity.toml
+/// Get identity file path: ~/.config/slingshot/identity.toml
 fn identity_path() -> Result<PathBuf, ConfigError> {
     Ok(paths::config_dir()?.join("identity.toml"))
 }

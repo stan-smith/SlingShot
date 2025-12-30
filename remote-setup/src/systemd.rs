@@ -4,9 +4,9 @@ use dialoguer::{theme::ColorfulTheme, Confirm, Input};
 use std::fs;
 use std::process::Command;
 
-const SERVICE_NAME: &str = "kaiju-remote";
-const SERVICE_FILE: &str = "/etc/systemd/system/kaiju-remote.service";
-const INSTALL_PATH: &str = "/usr/local/bin/kaiju-remote";
+const SERVICE_NAME: &str = "slingshot-remote";
+const SERVICE_FILE: &str = "/etc/systemd/system/slingshot-remote.service";
+const INSTALL_PATH: &str = "/usr/local/bin/slingshot-remote";
 
 /// Get current service status as a human-readable string
 pub fn get_service_status() -> String {
@@ -77,7 +77,7 @@ pub fn install_service() -> Result<()> {
     println!("Service configuration:");
     println!("  User: {}", service_user);
     println!("  Binary: {}", INSTALL_PATH);
-    println!("  Config: ~/.config/kaiju/remote.toml");
+    println!("  Config: ~/.config/slingshot/remote.toml");
     println!();
 
     let proceed = Confirm::with_theme(&ColorfulTheme::default())
@@ -115,7 +115,7 @@ pub fn install_service() -> Result<()> {
     println!("Installing service file...");
 
     // Write to temp file first, then sudo mv
-    let temp_file = "/tmp/kaiju-remote.service";
+    let temp_file = "/tmp/slingshot-remote.service";
     fs::write(temp_file, &service_content)?;
 
     let status = Command::new("sudo")
@@ -204,7 +204,7 @@ pub fn uninstall_service() -> Result<()> {
     }
 
     let proceed = Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("Uninstall kaiju-remote service?")
+        .with_prompt("Uninstall slingshot-remote service?")
         .default(false)
         .interact()?;
 
@@ -264,7 +264,7 @@ pub fn uninstall_service() -> Result<()> {
 
     println!();
     println!("Service uninstalled.");
-    println!("Note: Configuration files in ~/.config/kaiju/ were not removed.");
+    println!("Note: Configuration files in ~/.config/slingshot/ were not removed.");
 
     Ok(())
 }
@@ -309,7 +309,7 @@ fn find_remote_binary() -> Result<String> {
 fn generate_service_file(config: &RemoteConfig, user: &str, home: &str) -> String {
     format!(
         r#"[Unit]
-Description=Kaiju Remote Node - {node_name}
+Description=Slingshot Remote Node - {node_name}
 After=network-online.target
 Wants=network-online.target
 

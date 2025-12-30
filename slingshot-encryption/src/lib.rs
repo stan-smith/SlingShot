@@ -1,4 +1,4 @@
-//! Encryption utilities for kaiju
+//! Encryption utilities for slingshot
 //!
 //! Provides X25519 key management and hybrid encryption for recordings.
 //! Central generates unique keypairs per remote, remotes store only the public key.

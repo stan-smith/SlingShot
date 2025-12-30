@@ -207,7 +207,7 @@ fn setup_admin_user() -> Result<()> {
 
     // Build otpauth URL for QR code
     let otpauth_url = format!(
-        "otpauth://totp/SlingShot:{}?secret={}&issuer=SlingShot&algorithm=SHA256&digits=6&period=30",
+        "otpauth://totp/SlingShot:{}?secret={}&issuer=SlingShot&algorithm=SHA1&digits=6&period=30",
         username, totp_secret
     );
 
@@ -317,7 +317,7 @@ fn setup_audit_logging() -> Result<()> {
     if enabled {
         println!();
         println!("Audit logging enabled.");
-        println!("Events stored at: ~/.local/share/kaiju/audit.db");
+        println!("Events stored at: ~/.local/share/slingshot/audit.db");
         println!("Retention period: {} days", retention_days);
     } else {
         println!();

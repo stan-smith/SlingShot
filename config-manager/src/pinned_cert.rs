@@ -79,7 +79,7 @@ impl PinnedCertConfig {
     }
 }
 
-/// Get pinned cert file path: ~/.config/kaiju/pinned-cert.toml
+/// Get pinned cert file path: ~/.config/slingshot/pinned-cert.toml
 fn pinned_cert_path() -> Result<PathBuf, ConfigError> {
     Ok(paths::config_dir()?.join("pinned-cert.toml"))
 }

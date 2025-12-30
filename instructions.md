@@ -21,16 +21,16 @@ you will not send over the target directory because khadas/pi is a different arc
 
 The remote crate has local dependencies that also need to be synced:
 ```bash
-rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/remote/ khadas@khadas:~/remote/
-rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/onvif-client/ khadas@khadas:~/onvif-client/
-rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/ffmpeg-recorder/ khadas@khadas:~/ffmpeg-recorder/
-rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/quic-common/ khadas@khadas:~/quic-common/
-rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/quic-metrics/ khadas@khadas:~/quic-metrics/
-rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/quic-video/ khadas@khadas:~/quic-video/
-rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/recording-retrieval/ khadas@khadas:~/recording-retrieval/
-rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/kaiju-encryption/ khadas@khadas:~/kaiju-encryption/
-rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/config-manager/ khadas@khadas:~/config-manager/
-rsync -avz --exclude='target' /home/stan/LocalProjects/final/kaiju/adaptive-bitrate/ khadas@khadas:~/adaptive-bitrate/
+rsync -avz --exclude='target' /home/stan/LocalProjects/final/slingshot/remote/ khadas@khadas:~/remote/
+rsync -avz --exclude='target' /home/stan/LocalProjects/final/slingshot/onvif-client/ khadas@khadas:~/onvif-client/
+rsync -avz --exclude='target' /home/stan/LocalProjects/final/slingshot/ffmpeg-recorder/ khadas@khadas:~/ffmpeg-recorder/
+rsync -avz --exclude='target' /home/stan/LocalProjects/final/slingshot/quic-common/ khadas@khadas:~/quic-common/
+rsync -avz --exclude='target' /home/stan/LocalProjects/final/slingshot/quic-metrics/ khadas@khadas:~/quic-metrics/
+rsync -avz --exclude='target' /home/stan/LocalProjects/final/slingshot/quic-video/ khadas@khadas:~/quic-video/
+rsync -avz --exclude='target' /home/stan/LocalProjects/final/slingshot/recording-retrieval/ khadas@khadas:~/recording-retrieval/
+rsync -avz --exclude='target' /home/stan/LocalProjects/final/slingshot/slingshot-encryption/ khadas@khadas:~/slingshot-encryption/
+rsync -avz --exclude='target' /home/stan/LocalProjects/final/slingshot/config-manager/ khadas@khadas:~/config-manager/
+rsync -avz --exclude='target' /home/stan/LocalProjects/final/slingshot/adaptive-bitrate/ khadas@khadas:~/adaptive-bitrate/
 ```
 
 After syncing, build on khadas:

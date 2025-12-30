@@ -454,7 +454,7 @@ impl FileTransferReceiver {
         let ciphertext = tokio::fs::read(encrypted_path).await?;
 
         // Decrypt
-        let plaintext = kaiju_encryption::open_with_hex_key(&ciphertext, secret_key)?;
+        let plaintext = slingshot_encryption::open_with_hex_key(&ciphertext, secret_key)?;
 
         // Compute decrypted filename by stripping .enc extension
         let encrypted_name = encrypted_path

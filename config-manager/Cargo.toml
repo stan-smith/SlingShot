@@ -2,7 +2,7 @@
 name = "config-manager"
 version = "0.1.0"
 edition = "2021"
-description = "Configuration management for kaiju remote nodes"
+description = "Configuration management for slingshot remote nodes"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

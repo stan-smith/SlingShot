@@ -8,8 +8,8 @@ use dialoguer::{theme::ColorfulTheme, Select};
 use fingerprint_store::FingerprintStore;
 
 #[derive(Parser)]
-#[command(name = "kaiju-central-setup")]
-#[command(about = "Interactive setup and installation tool for kaiju central node")]
+#[command(name = "slingshot-central-setup")]
+#[command(about = "Interactive setup and installation tool for slingshot central node")]
 struct Cli {
     /// Run configuration wizard directly
     #[arg(long)]
@@ -51,7 +51,7 @@ fn main() -> Result<()> {
 
 fn run_menu() -> Result<()> {
     println!();
-    println!("~ KAIJU CENTRAL NODE SETUP ~");
+    println!("~ SLINGSHOT CENTRAL NODE SETUP ~");
     println!();
 
     loop {

@@ -70,7 +70,7 @@ async fn async_main() -> Result<()> {
         Err(_) => {
             eprintln!("No configuration found.");
             eprintln!();
-            eprintln!("Run 'kaiju-central-setup' to configure network bindings before starting.");
+            eprintln!("Run 'slingshot-central-setup' to configure network bindings before starting.");
             std::process::exit(1);
         }
     };
@@ -793,7 +793,7 @@ async fn handle_connection(
         // File transfer receiver for this node
         let output_dir = dirs::video_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("kaiju")
+            .join("slingshot")
             .join(&node_name);
 
         // Look up decryption key for this node
@@ -1178,7 +1178,7 @@ fn print_help() {
     println!("  <node> recordings since midnight       - Since midnight today");
     println!("  <node> recordings last hour            - Last 60 minutes");
     println!("  <node> recordings <ISO8601> <ISO8601>  - Specific time range");
-    println!("  Files saved to: ~/Videos/kaiju/<node>/");
+    println!("  Files saved to: ~/Videos/slingshot/<node>/");
     println!();
     println!("Relayed streams: rtsp://<host>:<port>/<node>/stream");
     println!("ONVIF PTZ:       http://<host>:<port>/onvif/<node>/ptz_service");
@@ -1186,5 +1186,5 @@ fn print_help() {
     println!("Options:");
     println!("  --debug                      - Show verbose metrics (QUIC stats, QoS, frame counts)");
     println!();
-    println!("Configuration: Run 'kaiju-central-setup' to configure network bindings and ports.");
+    println!("Configuration: Run 'slingshot-central-setup' to configure network bindings and ports.");
 }

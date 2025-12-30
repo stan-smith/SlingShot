@@ -2,7 +2,7 @@
 name = "audit-log"
 version = "0.1.0"
 edition = "2021"
-description = "Audit logging for kaiju central node"
+description = "Audit logging for slingshot central node"
 
 [dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }

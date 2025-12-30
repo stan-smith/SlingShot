@@ -13,7 +13,7 @@ impl AuditLogger {
     /// Get the default database path
     pub fn default_path() -> Result<PathBuf, AuditError> {
         let data_dir = dirs::data_dir().ok_or(AuditError::NoDataDir)?;
-        Ok(data_dir.join("kaiju").join("audit.db"))
+        Ok(data_dir.join("slingshot").join("audit.db"))
     }
 
     /// Open the audit logger at the default path

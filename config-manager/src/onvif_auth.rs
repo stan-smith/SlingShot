@@ -81,7 +81,7 @@ impl OnvifAuthConfig {
     }
 }
 
-/// Get ONVIF auth config path: ~/.config/kaiju/onvif_auth.toml
+/// Get ONVIF auth config path: ~/.config/slingshot/onvif_auth.toml
 fn onvif_auth_path() -> Result<PathBuf, ConfigError> {
     Ok(paths::config_dir()?.join("onvif_auth.toml"))
 }

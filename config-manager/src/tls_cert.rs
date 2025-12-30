@@ -96,12 +96,12 @@ impl TlsCertConfig {
     }
 }
 
-/// Get certificate file path: ~/.config/kaiju/tls-cert.pem
+/// Get certificate file path: ~/.config/slingshot/tls-cert.pem
 fn cert_path() -> Result<PathBuf, ConfigError> {
     Ok(paths::config_dir()?.join("tls-cert.pem"))
 }
 
-/// Get key file path: ~/.config/kaiju/tls-key.pem
+/// Get key file path: ~/.config/slingshot/tls-key.pem
 fn key_path() -> Result<PathBuf, ConfigError> {
     Ok(paths::config_dir()?.join("tls-key.pem"))
 }

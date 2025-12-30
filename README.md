@@ -1,4 +1,4 @@
-# Kaiju
+# Slingshot
 
 Distributed RTSP streaming system with central control and remote edge nodes.
 

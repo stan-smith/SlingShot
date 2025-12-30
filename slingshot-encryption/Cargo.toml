@@ -1,8 +1,8 @@
 [package]
-name = "kaiju-encryption"
+name = "slingshot-encryption"
 version = "0.1.0"
 edition = "2021"
-description = "Encryption utilities for kaiju - X25519 key management and hybrid encryption"
+description = "Encryption utilities for slingshot - X25519 key management and hybrid encryption"
 
 [dependencies]
 x25519-dalek = { version = "2", features = ["static_secrets"] }

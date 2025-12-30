@@ -1,6 +1,6 @@
-//! HLS Server for Kaiju video streaming.
+//! HLS Server for Slingshot video streaming.
 //!
-//! This crate provides HTTP Live Streaming (HLS) functionality for the Kaiju
+//! This crate provides HTTP Live Streaming (HLS) functionality for the Slingshot
 //! video surveillance system. It handles:
 //!
 //! - **Live streaming**: Transcodes RTSP streams to HLS using ffmpeg

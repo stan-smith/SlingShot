@@ -1,4 +1,4 @@
-//! Audit logging for kaiju central node
+//! Audit logging for slingshot central node
 //!
 //! Provides structured audit logging with SQLite backend for security events,
 //! command tracking, and compliance requirements.

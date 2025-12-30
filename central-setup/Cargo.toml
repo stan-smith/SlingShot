@@ -2,10 +2,10 @@
 name = "central-setup"
 version = "0.1.0"
 edition = "2021"
-description = "Interactive setup tool for kaiju central node"
+description = "Interactive setup tool for slingshot central node"
 
 [[bin]]
-name = "kaiju-central-setup"
+name = "slingshot-central-setup"
 path = "src/main.rs"
 
 [dependencies]

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use kaiju_encryption::X25519KeyPair;
+use slingshot_encryption::X25519KeyPair;
 use rand::Rng;
 use rusqlite::{params, Connection};
 use totp_rs::{Algorithm, TOTP};
@@ -83,7 +83,7 @@ pub struct FingerprintStore {
 
 impl FingerprintStore {
     /// Open or create database at default XDG location
-    /// ~/.local/share/kaiju/approved_nodes.db
+    /// ~/.local/share/slingshot/approved_nodes.db
     pub fn open() -> Result<Self, StoreError> {
         let path = Self::default_path()?;
         Self::open_at(&path)
@@ -93,7 +93,7 @@ impl FingerprintStore {
     pub fn default_path() -> Result<PathBuf, StoreError> {
         let data_dir = dirs::data_dir()
             .ok_or(StoreError::NoDataDir)?
-            .join("kaiju");
+            .join("slingshot");
         Ok(data_dir.join("approved_nodes.db"))
     }
 
@@ -663,6 +663,33 @@ impl FingerprintStore {
         )?;
 
         Ok(())
+    }
+
+    /// Regenerate TOTP secret for an existing user.
+    /// Returns (base32_secret, qr_png_bytes) for the new secret.
+    /// Invalidates all existing sessions for security.
+    pub fn regenerate_totp(&self, username: &str) -> Result<(String, Vec<u8>), StoreError> {
+        // Verify user exists
+        if self.get_user(username)?.is_none() {
+            return Err(StoreError::NotFound(username.to_string()));
+        }
+
+        // Generate new TOTP secret
+        let (new_secret, qr_png) = Self::generate_totp_secret(username)?;
+
+        // Update the secret in database
+        self.conn.execute(
+            "UPDATE admin_users SET totp_secret = ? WHERE username = ?",
+            params![new_secret, username],
+        )?;
+
+        // Invalidate all sessions for this user (security measure)
+        self.conn.execute(
+            "DELETE FROM admin_sessions WHERE username = ?",
+            [username],
+        )?;
+
+        Ok((new_secret, qr_png))
     }
 
     /// Create a new session for a user, returns the session token

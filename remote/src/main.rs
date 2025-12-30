@@ -43,7 +43,7 @@ const ENCRYPTION_INTERVAL_SECS: u64 = 5;
 
 #[derive(Parser)]
 #[command(name = "remote")]
-#[command(about = "Kaiju remote edge node - streams video to central node")]
+#[command(about = "Slingshot remote edge node - streams video to central node")]
 struct Cli {
     /// Node name for identification (required on first run, optional after)
     #[arg(short, long)]
@@ -850,7 +850,7 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                             eprintln!("CERTIFICATE MISMATCH - possible MITM attack!");
                             eprintln!("The server's certificate does not match the pinned certificate.");
                             eprintln!("If the server certificate was legitimately changed:");
-                            eprintln!("  Delete ~/.config/kaiju/pinned-cert.toml to re-establish trust");
+                            eprintln!("  Delete ~/.config/slingshot/pinned-cert.toml to re-establish trust");
                             // Don't retry automatically for security - exit
                             std::process::exit(1);
                         }
@@ -1006,7 +1006,7 @@ async fn async_main(mut config: RemoteConfig, save_config: bool, debug: bool) ->
                                 eprintln!("  Received: {}...", &central_fp[..16]);
                                 eprintln!("This could indicate a man-in-the-middle attack.");
                                 eprintln!("If central was legitimately reinstalled, delete:");
-                                eprintln!("  ~/.config/kaiju/central-pubkey.toml");
+                                eprintln!("  ~/.config/slingshot/central-pubkey.toml");
                                 break 'reconnect;
                             }
                             // Load verifying key from stored fingerprint

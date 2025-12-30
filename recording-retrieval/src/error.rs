@@ -1,7 +1,7 @@
 //! Error types for recording retrieval
 
 use chrono::{DateTime, Local};
-use kaiju_encryption::EncryptionError;
+use slingshot_encryption::EncryptionError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RetrievalError {

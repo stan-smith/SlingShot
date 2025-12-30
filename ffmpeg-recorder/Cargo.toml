@@ -10,7 +10,7 @@ chrono = "0.4"
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 nix = { version = "0.29", features = ["fs"] }
-kaiju-encryption = { path = "../kaiju-encryption" }
+slingshot-encryption = { path = "../slingshot-encryption" }
 
 [dev-dependencies]
 tempfile = "3"

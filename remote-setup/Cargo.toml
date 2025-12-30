@@ -2,10 +2,10 @@
 name = "remote-setup"
 version = "0.1.0"
 edition = "2021"
-description = "Interactive setup and installation tool for kaiju remote nodes"
+description = "Interactive setup and installation tool for slingshot remote nodes"
 
 [[bin]]
-name = "kaiju-remote-setup"
+name = "slingshot-remote-setup"
 path = "src/main.rs"
 
 [dependencies]
@@ -14,6 +14,12 @@ config-manager = { path = "../config-manager" }
 
 # ONVIF client for camera discovery
 onvif-client = { path = "../onvif-client" }
+
+# Fingerprint store for admin user management
+fingerprint-store = { path = "../fingerprint-store" }
+
+# QR code generation
+qrcode = "0.14"
 
 # CLI parsing
 clap = { version = "4", features = ["derive"] }
