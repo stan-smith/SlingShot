@@ -6,7 +6,8 @@ use axum::{
         ws::{Message, WebSocket},
         State, WebSocketUpgrade,
     },
-    response::{Html, IntoResponse},
+    http::header,
+    response::{Html, IntoResponse, Response},
     routing::get,
     Router,
 };
@@ -147,6 +148,15 @@ pub async fn run_admin_server(addr: &str, state: Arc<AdminState>) -> Result<()> 
         .route("/", get(index_handler))
         .route("/admin", get(admin_page_handler))
         .route("/ws", get(ws_handler))
+        // Theme CSS routes
+        .route("/themes/corporate-clean/dashboard.css", get(theme_corporate_clean_dashboard))
+        .route("/themes/corporate-clean/admin.css", get(theme_corporate_clean_admin))
+        .route("/themes/industrial-ops/dashboard.css", get(theme_industrial_ops_dashboard))
+        .route("/themes/industrial-ops/admin.css", get(theme_industrial_ops_admin))
+        .route("/themes/material/dashboard.css", get(theme_material_dashboard))
+        .route("/themes/material/admin.css", get(theme_material_admin))
+        .route("/themes/glass/dashboard.css", get(theme_glass_dashboard))
+        .route("/themes/glass/admin.css", get(theme_glass_admin))
         .with_state(state)
         // HLS streaming routes - merged without state (already has its own)
         .nest("/hls", hls_router);
@@ -166,6 +176,47 @@ async fn index_handler() -> impl IntoResponse {
 
 async fn admin_page_handler() -> impl IntoResponse {
     Html(ADMIN_HTML)
+}
+
+// CSS response helper
+fn css_response(content: &'static str) -> Response {
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/css")
+        .body(content.into())
+        .unwrap()
+}
+
+// Theme CSS handlers
+async fn theme_corporate_clean_dashboard() -> Response {
+    css_response(THEME_CORPORATE_CLEAN_DASHBOARD)
+}
+
+async fn theme_corporate_clean_admin() -> Response {
+    css_response(THEME_CORPORATE_CLEAN_ADMIN)
+}
+
+async fn theme_industrial_ops_dashboard() -> Response {
+    css_response(THEME_INDUSTRIAL_OPS_DASHBOARD)
+}
+
+async fn theme_industrial_ops_admin() -> Response {
+    css_response(THEME_INDUSTRIAL_OPS_ADMIN)
+}
+
+async fn theme_material_dashboard() -> Response {
+    css_response(THEME_MATERIAL_DASHBOARD)
+}
+
+async fn theme_material_admin() -> Response {
+    css_response(THEME_MATERIAL_ADMIN)
+}
+
+async fn theme_glass_dashboard() -> Response {
+    css_response(THEME_GLASS_DASHBOARD)
+}
+
+async fn theme_glass_admin() -> Response {
+    css_response(THEME_GLASS_ADMIN)
 }
 
 async fn ws_handler(
@@ -733,3 +784,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AdminState>, client_ip: IpA
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const ADMIN_HTML: &str = include_str!("../static/admin.html");
+
+// Theme CSS files
+const THEME_CORPORATE_CLEAN_DASHBOARD: &str = include_str!("../static/themes/corporate-clean/dashboard.css");
+const THEME_CORPORATE_CLEAN_ADMIN: &str = include_str!("../static/themes/corporate-clean/admin.css");
+const THEME_INDUSTRIAL_OPS_DASHBOARD: &str = include_str!("../static/themes/industrial-ops/dashboard.css");
+const THEME_INDUSTRIAL_OPS_ADMIN: &str = include_str!("../static/themes/industrial-ops/admin.css");
+const THEME_MATERIAL_DASHBOARD: &str = include_str!("../static/themes/material/dashboard.css");
+const THEME_MATERIAL_ADMIN: &str = include_str!("../static/themes/material/admin.css");
+const THEME_GLASS_DASHBOARD: &str = include_str!("../static/themes/glass/dashboard.css");
+const THEME_GLASS_ADMIN: &str = include_str!("../static/themes/glass/admin.css");

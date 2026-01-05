@@ -46,71 +46,13 @@ impl Default for ServiceEndpoints {
 }
 
 impl ServiceEndpoints {
-    /// Separate *_service endpoints (Wisenet, Hanwha, Dahua, Axis, Reolink, Vivotek)
+    /// Separate service endpoints (used by Wisenet and some other cameras)
     pub fn separate() -> Self {
         Self {
             device: "/onvif/device_service".to_string(),
             media: "/onvif/media_service".to_string(),
             ptz: "/onvif/ptz_service".to_string(),
         }
-    }
-
-    /// Capitalized endpoints (Hikvision, Uniview)
-    pub fn capitalized() -> Self {
-        Self {
-            device: "/onvif/device_service".to_string(),
-            media: "/onvif/Media".to_string(),
-            ptz: "/onvif/PTZ".to_string(),
-        }
-    }
-
-    /// Lowercase endpoints (Amcrest, some generic cameras)
-    pub fn lowercase() -> Self {
-        Self {
-            device: "/onvif/device_service".to_string(),
-            media: "/onvif/media".to_string(),
-            ptz: "/onvif/ptz".to_string(),
-        }
-    }
-
-    /// ONVIF-HTTP style endpoints (some generic/budget cameras)
-    pub fn onvif_http() -> Self {
-        Self {
-            device: "/onvif-http/device".to_string(),
-            media: "/onvif-http/media".to_string(),
-            ptz: "/onvif-http/ptz".to_string(),
-        }
-    }
-
-    /// Custom endpoint constructor
-    pub fn custom(device: &str, media: &str, ptz: &str) -> Self {
-        Self {
-            device: device.to_string(),
-            media: media.to_string(),
-            ptz: ptz.to_string(),
-        }
-    }
-
-    /// Returns a list of common media endpoint fallbacks to try
-    pub fn media_fallbacks() -> &'static [&'static str] {
-        &[
-            "/onvif/services",
-            "/onvif/media_service",
-            "/onvif/Media",
-            "/onvif/media",
-            "/onvif-http/media",
-        ]
-    }
-
-    /// Returns a list of common PTZ endpoint fallbacks to try
-    pub fn ptz_fallbacks() -> &'static [&'static str] {
-        &[
-            "/onvif/services",
-            "/onvif/ptz_service",
-            "/onvif/PTZ",
-            "/onvif/ptz",
-            "/onvif-http/ptz",
-        ]
     }
 }
 
@@ -516,35 +458,18 @@ impl OnvifClient {
             Ok(response) => return Ok(extract_profiles(&response)),
             Err(e) => {
                 let err_str = e.to_string();
-                // If 404 or 401, try fallback endpoints
+                // If 404 or 401 and using default endpoints, try separate media endpoint
                 // Some cameras return 401 for non-existent endpoints instead of 404
-                if err_str.contains("404") || err_str.contains("401") {
-                    let current_media = self.endpoints.media.clone();
+                if (err_str.contains("404") || err_str.contains("401"))
+                    && self.endpoints.media == "/onvif/services"
+                {
+                    // Update endpoints and retry (keep detected auth)
+                    self.endpoints.media = "/onvif/media_service".to_string();
+                    self.endpoints.ptz = "/onvif/ptz_service".to_string();
 
-                    // Try each fallback endpoint
-                    for fallback in ServiceEndpoints::media_fallbacks() {
-                        if *fallback == current_media {
-                            continue; // Skip the one we already tried
-                        }
-
-                        self.endpoints.media = fallback.to_string();
-                        // Update PTZ endpoint to match the pattern
-                        self.endpoints.ptz = fallback
-                            .replace("media_service", "ptz_service")
-                            .replace("Media", "PTZ")
-                            .replace("media", "ptz");
-
-                        // Clear detected auth for new endpoint
-                        self.detected_auth = None;
-
-                        let alt_url = self.media_url();
-                        if let Ok(response) = self.soap_request(&alt_url, body) {
-                            return Ok(extract_profiles(&response));
-                        }
-                    }
-
-                    // Restore original endpoints if all fallbacks failed
-                    self.endpoints.media = current_media;
+                    let alt_url = self.media_url();
+                    let response = self.soap_request(&alt_url, body)?;
+                    return Ok(extract_profiles(&response));
                 }
                 return Err(e);
             }
