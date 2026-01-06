@@ -175,6 +175,22 @@ impl OnvifClient {
         }
     }
 
+    /// Fetch current camera time from HTTP Date header
+    fn fetch_camera_time(&self) -> DateTime<Utc> {
+        let url = format!("http://{}/", self.host);
+        if let Ok(resp) = self.client.head(&url).send() {
+            if let Some(date_header) = resp.headers().get("date") {
+                if let Ok(date_str) = date_header.to_str() {
+                    if let Ok(camera_time) = DateTime::parse_from_rfc2822(date_str) {
+                        return camera_time.with_timezone(&Utc);
+                    }
+                }
+            }
+        }
+        // Fallback to local time if camera time unavailable
+        Utc::now()
+    }
+
     /// Generate WS-Security UsernameToken header
     fn generate_ws_security_header(&self) -> String {
         // Generate 16-byte random nonce
@@ -182,9 +198,9 @@ impl OnvifClient {
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
         let nonce_b64 = BASE64.encode(nonce_bytes);
 
-        // Calculate created timestamp using camera time offset
-        let offset = self.camera_time_offset.unwrap_or_else(Duration::zero);
-        let created = (Utc::now() + offset).format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        // Use camera's current time directly (not an offset from our time)
+        // This is critical for cameras with incorrect clocks
+        let created = self.fetch_camera_time().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
         // Compute password digest: Base64(SHA1(nonce + created + password))
         let mut hasher = Sha1::new();
@@ -399,11 +415,6 @@ impl OnvifClient {
 
     /// Send request with WS-Security authentication
     fn soap_request_ws_security(&mut self, url: &str, body: &str) -> Result<String> {
-        // Ensure we have camera time offset
-        if self.camera_time_offset.is_none() {
-            self.camera_time_offset = Some(self.fetch_camera_time_offset()?);
-        }
-
         let envelope = self.build_soap_envelope(body, true);
 
         let resp = self
@@ -492,7 +503,27 @@ impl OnvifClient {
         );
 
         let url = self.media_url();
-        let response = self.soap_request(&url, &body)?;
+
+        // Try primary endpoint first
+        let response = match self.soap_request(&url, &body) {
+            Ok(resp) => resp,
+            Err(e) => {
+                let err_str = e.to_string();
+                // If 404 or 401 and using default endpoints, try separate media endpoint
+                // Some cameras (like Wisenet) use /onvif/media_service instead of /onvif/services
+                if (err_str.contains("404") || err_str.contains("401"))
+                    && self.endpoints.media == "/onvif/services"
+                {
+                    self.endpoints.media = "/onvif/media_service".to_string();
+                    self.endpoints.ptz = "/onvif/ptz_service".to_string();
+
+                    let alt_url = self.media_url();
+                    self.soap_request(&alt_url, &body)?
+                } else {
+                    return Err(e);
+                }
+            }
+        };
 
         let uri = extract_xml_value(&response, "Uri").context("No Uri in response")?;
         let uri = uri.replace("&amp;", "&");
@@ -516,69 +547,100 @@ impl OnvifClient {
         self.get_stream_uri_for_profile(&profile)
     }
 
+    /// Send PTZ request with endpoint fallback
+    fn ptz_request(&mut self, body: &str) -> Result<String> {
+        let url = self.ptz_url();
+
+        match self.soap_request(&url, body) {
+            Ok(resp) => Ok(resp),
+            Err(e) => {
+                let err_str = e.to_string();
+                // If 404 or 401 and using default endpoints, try separate PTZ endpoint
+                // Some cameras (like Wisenet) use /onvif/ptz_service instead of /onvif/services
+                if (err_str.contains("404") || err_str.contains("401"))
+                    && self.endpoints.ptz == "/onvif/services"
+                {
+                    self.endpoints.media = "/onvif/media_service".to_string();
+                    self.endpoints.ptz = "/onvif/ptz_service".to_string();
+
+                    let alt_url = self.ptz_url();
+                    self.soap_request(&alt_url, body)
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
     /// PTZ continuous move (pan/tilt/zoom speeds from -1.0 to 1.0)
     pub fn ptz_move(&mut self, pan: f32, tilt: f32, zoom: f32) -> Result<()> {
+        // Use namespace prefixes (tptz/tt) to match Python - some cameras are strict
         let body = format!(
-            r#"<ContinuousMove xmlns="http://www.onvif.org/ver20/ptz/wsdl">
-      <ProfileToken>{}</ProfileToken>
-      <Velocity>
-        <PanTilt xmlns="http://www.onvif.org/ver10/schema" x="{}" y="{}"/>
-        <Zoom xmlns="http://www.onvif.org/ver10/schema" x="{}"/>
-      </Velocity>
-    </ContinuousMove>"#,
-            escape_xml(&self.profile), pan, tilt, zoom
+            r#"<tptz:ContinuousMove>
+      <tptz:ProfileToken>{}</tptz:ProfileToken>
+      <tptz:Velocity>
+        <tt:PanTilt x="{}" y="{}"/>
+        <tt:Zoom x="{}"/>
+      </tptz:Velocity>
+    </tptz:ContinuousMove>"#,
+            escape_xml(&self.profile),
+            pan,
+            tilt,
+            zoom
         );
 
-        let url = self.ptz_url();
-        self.soap_request(&url, &body)?;
+        self.ptz_request(&body)?;
         Ok(())
     }
 
     /// PTZ stop all movement
     pub fn ptz_stop(&mut self) -> Result<()> {
+        // Use namespace prefixes to match Python
         let body = format!(
-            r#"<Stop xmlns="http://www.onvif.org/ver20/ptz/wsdl">
-      <ProfileToken>{}</ProfileToken>
-      <PanTilt>true</PanTilt>
-      <Zoom>true</Zoom>
-    </Stop>"#,
+            r#"<tptz:Stop>
+      <tptz:ProfileToken>{}</tptz:ProfileToken>
+      <tptz:PanTilt>true</tptz:PanTilt>
+      <tptz:Zoom>true</tptz:Zoom>
+    </tptz:Stop>"#,
             escape_xml(&self.profile)
         );
 
-        let url = self.ptz_url();
-        self.soap_request(&url, &body)?;
+        self.ptz_request(&body)?;
         Ok(())
     }
 
     /// PTZ absolute move (positions from -1.0 to 1.0 for pan/tilt, 0.0 to 1.0 for zoom)
     pub fn ptz_goto(&mut self, pan: f32, tilt: f32, zoom: f32) -> Result<()> {
+        // Use namespace prefixes to match Python
         let body = format!(
-            r#"<AbsoluteMove xmlns="http://www.onvif.org/ver20/ptz/wsdl">
-      <ProfileToken>{}</ProfileToken>
-      <Position>
-        <PanTilt xmlns="http://www.onvif.org/ver10/schema" x="{}" y="{}"/>
-        <Zoom xmlns="http://www.onvif.org/ver10/schema" x="{}"/>
-      </Position>
-    </AbsoluteMove>"#,
-            escape_xml(&self.profile), pan, tilt, zoom
+            r#"<tptz:AbsoluteMove>
+      <tptz:ProfileToken>{}</tptz:ProfileToken>
+      <tptz:Position>
+        <tt:PanTilt x="{}" y="{}"/>
+        <tt:Zoom x="{}"/>
+      </tptz:Position>
+    </tptz:AbsoluteMove>"#,
+            escape_xml(&self.profile),
+            pan,
+            tilt,
+            zoom
         );
 
-        let url = self.ptz_url();
-        self.soap_request(&url, &body)?;
+        self.ptz_request(&body)?;
         Ok(())
     }
 
     /// Get current PTZ position
     pub fn ptz_status(&mut self) -> Result<PtzPosition> {
+        // Use namespace prefixes to match Python
         let body = format!(
-            r#"<GetStatus xmlns="http://www.onvif.org/ver20/ptz/wsdl">
-      <ProfileToken>{}</ProfileToken>
-    </GetStatus>"#,
+            r#"<tptz:GetStatus>
+      <tptz:ProfileToken>{}</tptz:ProfileToken>
+    </tptz:GetStatus>"#,
             escape_xml(&self.profile)
         );
 
-        let url = self.ptz_url();
-        let response = self.soap_request(&url, &body)?;
+        let response = self.ptz_request(&body)?;
         extract_ptz_position(&response).context("Could not parse PTZ position")
     }
 }
