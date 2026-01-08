@@ -5,9 +5,7 @@ mod wizard;
 use anyhow::Result;
 use clap::Parser;
 use config_manager::RemoteConfig;
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
-use fingerprint_store::FingerprintStore;
-use qrcode::QrCode;
+use dialoguer::{theme::ColorfulTheme, Select};
 
 #[derive(Parser)]
 #[command(name = "slingshot-remote-setup")]
@@ -28,10 +26,6 @@ struct Cli {
     /// Show current configuration and service status
     #[arg(long)]
     status: bool,
-
-    /// Regenerate admin user credentials (TOTP)
-    #[arg(long)]
-    regenerate_admin: bool,
 }
 
 fn main() -> Result<()> {
@@ -49,9 +43,6 @@ fn main() -> Result<()> {
     }
     if cli.status {
         return show_status();
-    }
-    if cli.regenerate_admin {
-        return regenerate_admin_credentials();
     }
 
     // No flags - show interactive menu
@@ -81,7 +72,6 @@ fn run_menu() -> Result<()> {
             "Install/update systemd service",
             "Uninstall systemd service",
             "Show current configuration",
-            "Regenerate admin credentials",
             "Exit",
         ];
 
@@ -117,11 +107,6 @@ fn run_menu() -> Result<()> {
                 }
             }
             4 => {
-                if let Err(e) = regenerate_admin_credentials() {
-                    eprintln!("Error: {}", e);
-                }
-            }
-            5 => {
                 println!("Goodbye!");
                 break;
             }
@@ -176,110 +161,3 @@ fn show_status() -> Result<()> {
 
     Ok(())
 }
-
-/// Display QR code in terminal using Unicode blocks
-fn display_qr_terminal(data: &str) -> Result<()> {
-    let code = QrCode::new(data.as_bytes())?;
-    let string = code
-        .render::<char>()
-        .quiet_zone(true)
-        .module_dimensions(2, 1)
-        .build();
-    println!("{}", string);
-    Ok(())
-}
-
-/// Regenerate admin user TOTP credentials
-fn regenerate_admin_credentials() -> Result<()> {
-    println!();
-    println!("~ Regenerate Admin Credentials ~");
-    println!();
-
-    let store = match FingerprintStore::open() {
-        Ok(s) => s,
-        Err(e) => {
-            println!("Error: Could not open fingerprint store: {}", e);
-            println!("Make sure you're running this on a central node.");
-            return Ok(());
-        }
-    };
-
-    // List existing users
-    let users = store.list_users()?;
-    if users.is_empty() {
-        println!("No admin users found.");
-        println!("Use 'slingshot-central-setup' to create an admin user first.");
-        return Ok(());
-    }
-
-    // Let user select which account to regenerate
-    let user_labels: Vec<String> = users
-        .iter()
-        .map(|u| format!("{} ({})", u.username, u.role))
-        .collect();
-
-    let selected = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Select user to regenerate credentials for")
-        .items(&user_labels)
-        .default(0)
-        .interact()?;
-
-    let username = &users[selected].username;
-
-    println!();
-    println!(
-        "WARNING: This will invalidate the current authenticator setup for '{}'.",
-        username
-    );
-    println!("The user will need to re-scan the QR code with their authenticator app.");
-    println!();
-
-    let confirm = Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("Are you sure you want to regenerate credentials?")
-        .default(false)
-        .interact()?;
-
-    if !confirm {
-        println!("Cancelled.");
-        return Ok(());
-    }
-
-    // Regenerate TOTP
-    let (totp_secret, _qr_png) = store.regenerate_totp(username)?;
-
-    // Build otpauth URL for QR code
-    let otpauth_url = format!(
-        "otpauth://totp/SlingShot:{}?secret={}&issuer=SlingShot&algorithm=SHA1&digits=6&period=30",
-        username, totp_secret
-    );
-
-    println!();
-    println!("New credentials generated for '{}'.", username);
-    println!();
-    println!("Scan this QR code with your authenticator app:");
-    println!("(Google Authenticator, Authy, 1Password, etc.)");
-    println!();
-    display_qr_terminal(&otpauth_url)?;
-    println!();
-    println!("Or manually enter this secret: {}", totp_secret);
-    println!();
-
-    // Verify new TOTP before completing
-    loop {
-        let code: String = Input::with_theme(&ColorfulTheme::default())
-            .with_prompt("Enter 6-digit code from your authenticator to verify")
-            .interact_text()?;
-
-        if FingerprintStore::verify_totp_code(&totp_secret, &code)? {
-            println!();
-            println!("Credentials verified and updated successfully!");
-            println!("All existing sessions have been invalidated.");
-            break;
-        } else {
-            println!("Invalid code. Please try again.");
-        }
-    }
-
-    Ok(())
-}
-

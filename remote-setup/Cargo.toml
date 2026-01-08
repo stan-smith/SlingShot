@@ -15,12 +15,6 @@ config-manager = { path = "../config-manager" }
 # ONVIF client for camera discovery
 onvif-client = { path = "../onvif-client" }
 
-# Fingerprint store for admin user management
-fingerprint-store = { path = "../fingerprint-store" }
-
-# QR code generation
-qrcode = "0.14"
-
 # CLI parsing
 clap = { version = "4", features = ["derive"] }
 

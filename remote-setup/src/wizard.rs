@@ -70,9 +70,9 @@ pub fn run_wizard() -> Result<()> {
         .default(default_source)
         .interact()?;
 
-    let source = match source_type {
+    let (source, camera_max_framerate) = match source_type {
         0 => configure_onvif(&existing)?,
-        1 => configure_rtsp(&existing)?,
+        1 => (configure_rtsp(&existing)?, None),
         _ => unreachable!(),
     };
 
@@ -104,7 +104,7 @@ pub fn run_wizard() -> Result<()> {
     println!("~ Streaming ~");
     println!();
 
-    let adaptive = configure_adaptive(&existing)?;
+    let adaptive = configure_adaptive(&existing, camera_max_framerate)?;
 
     // Build config
     let config = RemoteConfig {
@@ -142,7 +142,8 @@ pub fn run_wizard() -> Result<()> {
     Ok(())
 }
 
-fn configure_onvif(existing: &Option<RemoteConfig>) -> Result<SourceConfig> {
+/// Returns (SourceConfig, max_framerate) where max_framerate is the camera's maximum fps if known
+fn configure_onvif(existing: &Option<RemoteConfig>) -> Result<(SourceConfig, Option<u32>)> {
     // Get existing ONVIF config for defaults
     let existing_onvif = existing.as_ref().and_then(|c| match &c.source {
         SourceConfig::Onvif(o) => Some(o),
@@ -182,13 +183,13 @@ fn configure_onvif(existing: &Option<RemoteConfig>) -> Result<SourceConfig> {
         Err(e) => {
             println!("Warning: Could not enumerate profiles: {}", e);
             println!("Continuing without profile selection.");
-            return Ok(SourceConfig::Onvif(OnvifConfig::new(ip, username, &password)));
+            return Ok((SourceConfig::Onvif(OnvifConfig::new(ip, username, &password)), None));
         }
     };
 
     if profiles.is_empty() {
         println!("No profiles found, using default.");
-        return Ok(SourceConfig::Onvif(OnvifConfig::new(ip, username, &password)));
+        return Ok((SourceConfig::Onvif(OnvifConfig::new(ip, username, &password)), None));
     }
 
     // Let user select profile
@@ -206,13 +207,15 @@ fn configure_onvif(existing: &Option<RemoteConfig>) -> Result<SourceConfig> {
             .interact()?
     };
 
-    let selected_token = profiles[selected].token.clone();
-    println!("Selected profile: {}", profiles[selected]);
+    let selected_profile = &profiles[selected];
+    let selected_token = selected_profile.token.clone();
+    let max_framerate = selected_profile.framerate;
+    println!("Selected profile: {}", selected_profile);
 
     // Create config with profile token
     let onvif_config = OnvifConfig::with_profile(ip, username, &password, selected_token);
 
-    Ok(SourceConfig::Onvif(onvif_config))
+    Ok((SourceConfig::Onvif(onvif_config), max_framerate))
 }
 
 fn configure_rtsp(existing: &Option<RemoteConfig>) -> Result<SourceConfig> {
@@ -289,7 +292,10 @@ fn configure_encryption(existing: &Option<RemoteConfig>) -> Result<bool> {
     Ok(enabled)
 }
 
-fn configure_adaptive(existing: &Option<RemoteConfig>) -> Result<Option<AdaptiveConfig>> {
+fn configure_adaptive(
+    existing: &Option<RemoteConfig>,
+    camera_max_framerate: Option<u32>,
+) -> Result<Option<AdaptiveConfig>> {
     let existing_adaptive = existing.as_ref().and_then(|c| c.adaptive.as_ref());
 
     println!("Adaptive bitrate automatically adjusts video quality based on network conditions.");
@@ -334,26 +340,56 @@ fn configure_adaptive(existing: &Option<RemoteConfig>) -> Result<Option<Adaptive
         _ => (640, 480),
     };
 
-    // Target framerate
-    let framerate_options = vec!["30 fps", "15 fps", "10 fps"];
-    let default_fps = existing_adaptive
-        .map(|a| match a.target_framerate {
-            30 => 0,
-            15 => 1,
-            _ => 2,
-        })
-        .unwrap_or(0);
+    // Target framerate - filter options based on camera's maximum capability
+    let all_framerates: Vec<i32> = vec![30, 25, 20, 15, 10, 5, 2, 1];
+    let max_fps = camera_max_framerate.unwrap_or(30) as i32;
 
-    let fps_idx = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Target framerate (maximum)")
-        .items(&framerate_options)
-        .default(default_fps)
-        .interact()?;
+    // Filter to only show framerates <= camera max
+    let available_framerates: Vec<i32> = all_framerates
+        .into_iter()
+        .filter(|&fps| fps <= max_fps)
+        .collect();
 
-    let target_framerate = match fps_idx {
-        0 => 30,
-        1 => 15,
-        _ => 10,
+    let target_framerate = if available_framerates.is_empty() {
+        // Shouldn't happen, but fallback to 1 fps
+        println!("Using 1 fps (camera maximum is very low)");
+        1
+    } else if available_framerates.len() == 1 {
+        // Only one option, auto-select it
+        let fps = available_framerates[0];
+        println!("Auto-selected {} fps (camera maximum)", fps);
+        fps
+    } else {
+        // Build options list for selection
+        let framerate_options: Vec<String> = available_framerates
+            .iter()
+            .enumerate()
+            .map(|(i, &fps)| {
+                if i == 0 {
+                    format!("{} fps (camera maximum)", fps)
+                } else {
+                    format!("{} fps", fps)
+                }
+            })
+            .collect();
+
+        // Find default selection based on existing config or first option
+        let default_fps = existing_adaptive
+            .map(|a| {
+                available_framerates
+                    .iter()
+                    .position(|&fps| fps == a.target_framerate)
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+
+        let fps_idx = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Target framerate (maximum)")
+            .items(&framerate_options)
+            .default(default_fps)
+            .interact()?;
+
+        available_framerates[fps_idx]
     };
 
     // Target bitrate
