@@ -754,7 +754,7 @@ button.reject:hover {
   position: relative;
 }
 .login-box::before {
-  content: '[ SECURE ACCESS ]';
+  content: '[ LOGIN ]';
   position: absolute;
   top: -10px;
   left: 50%;
